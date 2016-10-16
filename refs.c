@@ -1652,12 +1652,32 @@ int create_symref(const char *ref_target, const char *refs_heads_master,
 				  refs_heads_master, logmsg);
 }
 
-int ref_transaction_commit(struct ref_transaction *transaction,
+int ref_transaction_prepare(struct ref_transaction *transaction,
+			    struct strbuf *err)
+{
+	struct ref_store *refs = transaction->ref_store;
+
+	return refs->be->transaction_prepare(refs, transaction, err);
+}
+
+int ref_transaction_finish(struct ref_transaction *transaction,
 			   struct strbuf *err)
 {
 	struct ref_store *refs = transaction->ref_store;
 
-	return refs->be->transaction_commit(refs, transaction, err);
+	return refs->be->transaction_finish(refs, transaction, err);
+}
+
+int ref_transaction_commit(struct ref_transaction *transaction,
+			   struct strbuf *err)
+{
+	int ret;
+
+	ret = ref_transaction_prepare(transaction, err);
+	if (ret)
+		return ret;
+
+	return ref_transaction_finish(transaction, err);
 }
 
 int refs_verify_refname_available(struct ref_store *refs,
