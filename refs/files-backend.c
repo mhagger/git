@@ -383,6 +383,15 @@ static struct packed_ref_cache *get_packed_ref_cache(struct files_ref_store *ref
 			stat_validity_update(&refs->packed->validity, fileno(f));
 			read_packed_refs(f, get_ref_dir(refs->packed->cache->root));
 			fclose(f);
+		} else if (errno == ENOENT) {
+			/*
+			 * This is OK; it just means that no
+			 * "packed-refs" file has been written yet,
+			 * which is equivalent to it being empty.
+			 */
+		} else {
+			die("couldn't read %s: %s",
+			    packed_refs_file, strerror(errno));
 		}
 	}
 	return refs->packed;
