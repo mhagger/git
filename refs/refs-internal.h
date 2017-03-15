@@ -649,6 +649,7 @@ struct ref_storage_be {
 };
 
 extern struct ref_storage_be refs_be_files;
+extern struct ref_storage_be refs_be_packed;
 
 /*
  * A representation of the reference store for the main repository or
@@ -666,5 +667,8 @@ struct ref_store {
  */
 void base_ref_store_init(struct ref_store *refs,
 			 const struct ref_storage_be *be);
+
+struct ref_store *packed_ref_store_create(const char *gitdir,
+					  unsigned int flags);
 
 #endif /* REFS_REFS_INTERNAL_H */
