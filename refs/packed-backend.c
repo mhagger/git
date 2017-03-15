@@ -56,6 +56,12 @@ struct packed_ref_cache {
 	struct ref_cache *cache;
 
 	/*
+	 * What is the peeled state of this cache? (This is usually
+	 * determined from the header of the "packed-refs" file.)
+	 */
+	enum { PEELED_NONE, PEELED_TAGS, PEELED_FULLY } peeled;
+
+	/*
 	 * Count of references to the data structure in this instance,
 	 * including the pointer from packed_ref_store::cache if any.
 	 * The data will not be freed until the reference count
@@ -281,11 +287,12 @@ static const char *parse_ref_line(struct strbuf *line, unsigned char *sha1)
  */
 static void read_packed_refs(struct packed_ref_store *refs, FILE *f)
 {
-	struct ref_dir *dir = get_ref_dir(refs->cache->cache->root);
+	struct packed_ref_cache *cache = refs->cache;
+	struct ref_dir *dir = get_ref_dir(cache->cache->root);
 	struct ref_entry *last = NULL;
 	struct strbuf line = STRBUF_INIT;
-	enum { PEELED_NONE, PEELED_TAGS, PEELED_FULLY } peeled = PEELED_NONE;
 
+	cache->peeled = PEELED_NONE;
 	while (strbuf_getwholeline(&line, f, '\n') != EOF) {
 		unsigned char sha1[20];
 		const char *refname;
@@ -293,9 +300,9 @@ static void read_packed_refs(struct packed_ref_store *refs, FILE *f)
 
 		if (skip_prefix(line.buf, "# pack-refs with:", &traits)) {
 			if (strstr(traits, " fully-peeled "))
-				peeled = PEELED_FULLY;
+				cache->peeled = PEELED_FULLY;
 			else if (strstr(traits, " peeled "))
-				peeled = PEELED_TAGS;
+				cache->peeled = PEELED_TAGS;
 			/* perhaps other traits later as well */
 			continue;
 		}
@@ -311,8 +318,8 @@ static void read_packed_refs(struct packed_ref_store *refs, FILE *f)
 				flag |= REF_BAD_NAME | REF_ISBROKEN;
 			}
 			last = create_ref_entry(refname, sha1, flag, 0);
-			if (peeled == PEELED_FULLY ||
-			    (peeled == PEELED_TAGS && starts_with(refname, "refs/tags/")))
+			if (cache->peeled == PEELED_FULLY ||
+			    (cache->peeled == PEELED_TAGS && starts_with(refname, "refs/tags/")))
 				last->flag |= REF_KNOWS_PEELED;
 			add_ref_entry(dir, last);
 			continue;
