@@ -1668,6 +1668,8 @@ int ref_update_reject_duplicates(struct string_list *refnames,
 				    "multiple updates for ref '%s' not allowed.",
 				    refnames->items[i].string);
 			return 1;
+		} else if (cmp > 0) {
+			die("BUG: ref_update_reject_duplicates() received unsorted list");
 		}
 	}
 	return 0;
