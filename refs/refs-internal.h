@@ -221,6 +221,7 @@ struct ref_transaction {
 	size_t alloc;
 	size_t nr;
 	enum ref_transaction_state state;
+	void *backend_data;
 };
 
 int ref_transaction_prepare(struct ref_transaction *transaction,
