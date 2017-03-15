@@ -253,7 +253,7 @@ static const char *parse_ref_line(struct strbuf *line, unsigned char *sha1)
 }
 
 /*
- * Read f, which is a packed-refs file, into dir.
+ * Read `f`, which is a packed-refs file, into `refs`.
  *
  * A comment line of the form "# pack-refs with: " may contain zero or
  * more traits. We interpret the traits as follows:
@@ -279,8 +279,9 @@ static const char *parse_ref_line(struct strbuf *line, unsigned char *sha1)
  *      compatibility with older clients, but we do not require it
  *      (i.e., "peeled" is a no-op if "fully-peeled" is set).
  */
-static void read_packed_refs(FILE *f, struct ref_dir *dir)
+static void read_packed_refs(struct packed_ref_store *refs, FILE *f)
 {
+	struct ref_dir *dir = get_ref_dir(refs->cache->cache->root);
 	struct ref_entry *last = NULL;
 	struct strbuf line = STRBUF_INIT;
 	enum { PEELED_NONE, PEELED_TAGS, PEELED_FULLY } peeled = PEELED_NONE;
@@ -367,7 +368,7 @@ static struct packed_ref_cache *get_packed_ref_cache(struct packed_ref_store *re
 		f = fopen(packed_refs_file, "r");
 		if (f) {
 			stat_validity_update(&refs->cache->validity, fileno(f));
-			read_packed_refs(f, get_ref_dir(refs->cache->cache->root));
+			read_packed_refs(refs, f);
 			fclose(f);
 		} else if (errno == ENOENT) {
 			/*
