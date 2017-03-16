@@ -300,7 +300,10 @@ static struct packed_ref_cache *read_packed_refs(struct packed_ref_store *refs)
 	struct strbuf line = STRBUF_INIT;
 	const char *packed_refs_file = packed_packed_refs_path(refs);
 	int fd;
-	FILE *f;
+	struct stat st;
+	char *buf;
+	const char *p, *end;
+	size_t size, len;
 
 	cache = xcalloc(1, sizeof(*cache));
 	cache->cache = create_ref_cache(&refs->base, NULL);
@@ -322,16 +325,28 @@ static struct packed_ref_cache *read_packed_refs(struct packed_ref_store *refs)
 
 	stat_validity_update(&cache->validity, fd);
 
-	f = fdopen(fd, "r");
-	if (!f)
-		die("error opening packed-refs file: %s", strerror(errno));
+	if (fstat(fd, &st) < 0)
+		die("couldn't stat %s: %s", packed_refs_file, strerror(errno));
+	size = xsize_t(st.st_size);
+	buf = xmmap(NULL, size, PROT_READ, MAP_PRIVATE, fd, 0);
 
 	cache->peeled = PEELED_NONE;
+
 	dir = get_ref_dir(cache->cache->root);
-	while (strbuf_getwholeline(&line, f, '\n') != EOF) {
+
+	p = buf;
+	len = size;
+	while (len) {
 		unsigned char sha1[20];
 		const char *refname;
 		const char *traits;
+
+		end = memchr(p, '\n', len);
+		if (!end)
+			die("packed-refs contents are truncated");
+
+		end++; /* Include the LF */
+		strbuf_add(&line, p, end - p);
 
 		if (skip_prefix(line.buf, "# pack-refs with:", &traits)) {
 			if (strstr(traits, " fully-peeled "))
@@ -339,7 +354,7 @@ static struct packed_ref_cache *read_packed_refs(struct packed_ref_store *refs)
 			else if (strstr(traits, " peeled "))
 				cache->peeled = PEELED_TAGS;
 			/* perhaps other traits later as well */
-			continue;
+			goto next_line;
 		}
 
 		refname = parse_ref_line(&line, sha1);
@@ -357,7 +372,7 @@ static struct packed_ref_cache *read_packed_refs(struct packed_ref_store *refs)
 			    (cache->peeled == PEELED_TAGS && starts_with(refname, "refs/tags/")))
 				last->flag |= REF_KNOWS_PEELED;
 			add_ref_entry(dir, last);
-			continue;
+			goto next_line;
 		}
 		if (last &&
 		    line.buf[0] == '^' &&
@@ -372,10 +387,18 @@ static struct packed_ref_cache *read_packed_refs(struct packed_ref_store *refs)
 			 */
 			last->flag |= REF_KNOWS_PEELED;
 		}
+
+	next_line:
+		len -= end - p;
+		p = end;
+		strbuf_reset(&line);
 	}
 
+	if (munmap(buf, size))
+		die("error ummapping packed-refs file: %s", strerror(errno));
+	close(fd);
+
 	strbuf_release(&line);
-	fclose(f);
 	return cache;
 }
 
