@@ -357,6 +357,7 @@ static struct packed_ref_cache *read_packed_refs(struct packed_ref_store *refs)
 	while (len) {
 		unsigned char sha1[20];
 		const char *refname;
+		int flag = REF_ISPACKED;
 
 		end = memchr(p, '\n', len);
 		if (!end)
@@ -365,26 +366,31 @@ static struct packed_ref_cache *read_packed_refs(struct packed_ref_store *refs)
 		strbuf_add(&line, p, end - p);
 
 		refname = parse_ref_line(&line, sha1);
-		if (refname) {
-			int flag = REF_ISPACKED;
+		if (!refname)
+			die("packed-refs contents are malformed");
 
-			if (check_refname_format(refname, REFNAME_ALLOW_ONELEVEL)) {
-				if (!refname_is_safe(refname))
-					die("packed refname is dangerous: %s", refname);
-				hashclr(sha1);
-				flag |= REF_BAD_NAME | REF_ISBROKEN;
-			}
-			last = create_ref_entry(refname, sha1, flag, 0);
-			if (cache->peeled == PEELED_FULLY ||
-			    (cache->peeled == PEELED_TAGS && starts_with(refname, "refs/tags/")))
-				last->flag |= REF_KNOWS_PEELED;
-			add_ref_entry(dir, last);
-			goto next_line;
+		if (check_refname_format(refname, REFNAME_ALLOW_ONELEVEL)) {
+			if (!refname_is_safe(refname))
+				die("packed refname is dangerous: %s", refname);
+			hashclr(sha1);
+			flag |= REF_BAD_NAME | REF_ISBROKEN;
 		}
-		if (last &&
-		    line.buf[0] == '^' &&
-		    line.len == PEELED_LINE_LENGTH &&
-		    !get_sha1_hex(line.buf + 1, sha1)) {
+		last = create_ref_entry(refname, sha1, flag, 0);
+		if (cache->peeled == PEELED_FULLY ||
+		    (cache->peeled == PEELED_TAGS && starts_with(refname, "refs/tags/")))
+			last->flag |= REF_KNOWS_PEELED;
+		add_ref_entry(dir, last);
+
+		/* Skip past that line: */
+		len -= end + 1 - p;
+		p = end + 1;
+		strbuf_reset(&line);
+
+		/* Check for a "peeled" line: */
+		if (len >= PEELED_LINE_LENGTH + 1 &&
+		    *p == '^' &&
+		    !get_sha1_hex(p + 1, sha1) &&
+		    p[PEELED_LINE_LENGTH] == '\n') {
 			hashcpy(last->u.value.peeled.hash, sha1);
 			/*
 			 * Regardless of what the file header said,
@@ -392,12 +398,10 @@ static struct packed_ref_cache *read_packed_refs(struct packed_ref_store *refs)
 			 * reference:
 			 */
 			last->flag |= REF_KNOWS_PEELED;
-		}
 
-	next_line:
-		len -= end + 1 - p;
-		p = end + 1;
-		strbuf_reset(&line);
+			len -= PEELED_LINE_LENGTH + 1;
+			p += PEELED_LINE_LENGTH + 1;
+		}
 	}
 
 	if (munmap(buf, size))
