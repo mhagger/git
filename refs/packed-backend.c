@@ -258,8 +258,15 @@ static const char *parse_ref_line(struct strbuf *line, unsigned char *sha1)
 	return ref;
 }
 
+static const char *packed_packed_refs_path(struct packed_ref_store *refs)
+{
+	return refs->packed_refs_path;
+}
+
 /*
- * Read `f`, which is a packed-refs file, into `refs`.
+ * Create and return a `packed_ref_cache` object representing the
+ * current contents of the `packed-refs` file for the specified
+ * `packed_ref_store`.
  *
  * A comment line of the form "# pack-refs with: " may contain zero or
  * more traits. We interpret the traits as follows:
@@ -285,14 +292,42 @@ static const char *parse_ref_line(struct strbuf *line, unsigned char *sha1)
  *      compatibility with older clients, but we do not require it
  *      (i.e., "peeled" is a no-op if "fully-peeled" is set).
  */
-static void read_packed_refs(struct packed_ref_store *refs, FILE *f)
+static struct packed_ref_cache *read_packed_refs(struct packed_ref_store *refs)
 {
-	struct packed_ref_cache *cache = refs->cache;
-	struct ref_dir *dir = get_ref_dir(cache->cache->root);
+	struct packed_ref_cache *cache;
+	struct ref_dir *dir;
 	struct ref_entry *last = NULL;
 	struct strbuf line = STRBUF_INIT;
+	const char *packed_refs_file = packed_packed_refs_path(refs);
+	int fd;
+	FILE *f;
+
+	cache = xcalloc(1, sizeof(*cache));
+	cache->cache = create_ref_cache(&refs->base, NULL);
+	cache->cache->root->flag &= ~REF_INCOMPLETE;
+	fd = open(packed_refs_file, O_RDONLY);
+	if (fd < 0) {
+		if (errno == ENOENT) {
+			/*
+			 * This is OK; it just means that no
+			 * "packed-refs" file has been written yet,
+			 * which is equivalent to it being empty.
+			 */
+			return cache;
+		} else {
+			die("couldn't read %s: %s",
+			    packed_refs_file, strerror(errno));
+		}
+	}
+
+	stat_validity_update(&cache->validity, fd);
+
+	f = fdopen(fd, "r");
+	if (!f)
+		die("error opening packed-refs file: %s", strerror(errno));
 
 	cache->peeled = PEELED_NONE;
+	dir = get_ref_dir(cache->cache->root);
 	while (strbuf_getwholeline(&line, f, '\n') != EOF) {
 		unsigned char sha1[20];
 		const char *refname;
@@ -340,11 +375,8 @@ static void read_packed_refs(struct packed_ref_store *refs, FILE *f)
 	}
 
 	strbuf_release(&line);
-}
-
-static const char *packed_packed_refs_path(struct packed_ref_store *refs)
-{
-	return refs->packed_refs_path;
+	fclose(f);
+	return cache;
 }
 
 /*
@@ -366,28 +398,11 @@ static struct packed_ref_cache *get_packed_ref_cache(struct packed_ref_store *re
 		clear_packed_ref_cache(refs, 0);
 
 	if (!refs->cache) {
-		FILE *f;
-
-		refs->cache = xcalloc(1, sizeof(*refs->cache));
+		refs->cache = read_packed_refs(refs);
 		acquire_packed_ref_cache(refs->cache);
-		refs->cache->cache = create_ref_cache(&refs->base, NULL);
-		refs->cache->cache->root->flag &= ~REF_INCOMPLETE;
-		f = fopen(packed_refs_file, "r");
-		if (f) {
-			stat_validity_update(&refs->cache->validity, fileno(f));
-			read_packed_refs(refs, f);
-			fclose(f);
-		} else if (errno == ENOENT) {
-			/*
-			 * This is OK; it just means that no
-			 * "packed-refs" file has been written yet,
-			 * which is equivalent to it being empty.
-			 */
-		} else {
-			die("couldn't read %s: %s",
-			    packed_refs_file, strerror(errno));
-		}
 	}
+
+
 	return refs->cache;
 }
 
