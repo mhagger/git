@@ -336,10 +336,34 @@ static struct packed_ref_cache *read_packed_refs(struct packed_ref_store *refs)
 
 	p = buf;
 	len = size;
+
+	/* Process the header line, if present: */
+	if (len && *p == '#') {
+		const char *traits;
+
+		end = memchr(p, '\n', len);
+		if (!end)
+			die("packed-refs header line is truncated");
+
+		strbuf_add(&line, p, end - p);
+
+		if (!skip_prefix(line.buf, "# pack-refs with:", &traits))
+			die("packed-refs header line is malformed");
+
+		if (strstr(traits, " fully-peeled "))
+			cache->peeled = PEELED_FULLY;
+		else if (strstr(traits, " peeled "))
+			cache->peeled = PEELED_TAGS;
+		/* perhaps other traits later as well */
+
+		len -= end + 1 - p;
+		p = end + 1;
+		strbuf_reset(&line);
+	}
+
 	while (len) {
 		unsigned char sha1[20];
 		const char *refname;
-		const char *traits;
 
 		end = memchr(p, '\n', len);
 		if (!end)
@@ -347,15 +371,6 @@ static struct packed_ref_cache *read_packed_refs(struct packed_ref_store *refs)
 
 		end++; /* Include the LF */
 		strbuf_add(&line, p, end - p);
-
-		if (skip_prefix(line.buf, "# pack-refs with:", &traits)) {
-			if (strstr(traits, " fully-peeled "))
-				cache->peeled = PEELED_FULLY;
-			else if (strstr(traits, " peeled "))
-				cache->peeled = PEELED_TAGS;
-			/* perhaps other traits later as well */
-			goto next_line;
-		}
 
 		refname = parse_ref_line(&line, sha1);
 		if (refname) {
