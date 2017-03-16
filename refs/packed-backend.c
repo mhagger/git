@@ -212,8 +212,8 @@ static struct packed_ref_store *packed_downcast(struct ref_store *ref_store,
 	return refs;
 }
 
-/* The length of a peeled reference line in packed-refs, including EOL: */
-#define PEELED_LINE_LENGTH 42
+/* The length of a peeled reference line in packed-refs, not including EOL: */
+#define PEELED_LINE_LENGTH (GIT_SHA1_HEXSZ + 1)
 
 /*
  * The packed-refs header line that we write out.  Perhaps other
@@ -232,28 +232,21 @@ static const char *parse_ref_line(struct strbuf *line, unsigned char *sha1)
 	const char *ref;
 
 	/*
-	 * 42: the answer to everything.
-	 *
-	 * In this case, it happens to be the answer to
-	 *  40 (length of sha1 hex representation)
-	 *  +1 (space in between hex and name)
-	 *  +1 (newline at the end of the line)
+	 * Verify that the line is at least long enough to hold a
+	 * SHA-1 in hex representation plus a space plus a non-empty
+	 * reference name:
 	 */
-	if (line->len <= 42)
+	if (line->len < GIT_SHA1_HEXSZ + 2)
 		return NULL;
 
 	if (get_sha1_hex(line->buf, sha1) < 0)
 		return NULL;
-	if (!isspace(line->buf[40]))
+	if (!isspace(line->buf[GIT_SHA1_HEXSZ]))
 		return NULL;
 
-	ref = line->buf + 41;
+	ref = line->buf + GIT_SHA1_HEXSZ + 1;
 	if (isspace(*ref))
 		return NULL;
-
-	if (line->buf[line->len - 1] != '\n')
-		return NULL;
-	line->buf[--line->len] = 0;
 
 	return ref;
 }
@@ -369,7 +362,6 @@ static struct packed_ref_cache *read_packed_refs(struct packed_ref_store *refs)
 		if (!end)
 			die("packed-refs contents are truncated");
 
-		end++; /* Include the LF */
 		strbuf_add(&line, p, end - p);
 
 		refname = parse_ref_line(&line, sha1);
@@ -392,7 +384,6 @@ static struct packed_ref_cache *read_packed_refs(struct packed_ref_store *refs)
 		if (last &&
 		    line.buf[0] == '^' &&
 		    line.len == PEELED_LINE_LENGTH &&
-		    line.buf[PEELED_LINE_LENGTH - 1] == '\n' &&
 		    !get_sha1_hex(line.buf + 1, sha1)) {
 			hashcpy(last->u.value.peeled.hash, sha1);
 			/*
@@ -404,8 +395,8 @@ static struct packed_ref_cache *read_packed_refs(struct packed_ref_store *refs)
 		}
 
 	next_line:
-		len -= end - p;
-		p = end;
+		len -= end + 1 - p;
+		p = end + 1;
 		strbuf_reset(&line);
 	}
 
