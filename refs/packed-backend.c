@@ -257,6 +257,141 @@ static const char *packed_packed_refs_path(struct packed_ref_store *refs)
 }
 
 /*
+ * An iterator over a packed-refs file that is currently mmapped.
+ */
+struct mmapped_ref_iterator {
+	struct ref_iterator base;
+
+	struct packed_ref_cache *cache;
+
+	/* The current position in the mmapped file: */
+	const char *pos;
+
+	/* The number of bytes left in the mmapped file: */
+	size_t len;
+
+	struct object_id oid, peeled;
+
+	struct strbuf tmp;
+};
+
+static int mmapped_ref_iterator_advance(struct ref_iterator *ref_iterator)
+{
+	struct mmapped_ref_iterator *iter =
+		(struct mmapped_ref_iterator *)ref_iterator;
+	const char *end;
+
+	strbuf_reset(&iter->tmp);
+
+	if (!iter->len)
+		return ref_iterator_abort(ref_iterator);
+
+	ref_iterator->flags = REF_ISPACKED;
+
+	end = memchr(iter->pos, '\n', iter->len);
+	if (!end)
+		die("packed-refs contents are truncated");
+
+	strbuf_add(&iter->tmp, iter->pos, end - iter->pos);
+
+	ref_iterator->refname = parse_ref_line(&iter->tmp, iter->oid.hash);
+	if (!ref_iterator->refname)
+		die("packed-refs contents are malformed");
+
+	if (check_refname_format(ref_iterator->refname, REFNAME_ALLOW_ONELEVEL)) {
+		if (!refname_is_safe(ref_iterator->refname))
+			die("packed refname is dangerous: %s", ref_iterator->refname);
+		oidclr(&iter->oid);
+		ref_iterator->flags |= REF_BAD_NAME | REF_ISBROKEN;
+	}
+	if (iter->cache->peeled == PEELED_FULLY ||
+	    (iter->cache->peeled == PEELED_TAGS &&
+	     starts_with(ref_iterator->refname, "refs/tags/")))
+		ref_iterator->flags |= REF_KNOWS_PEELED;
+
+	/* Skip past that line: */
+	iter->len -= end + 1 - iter->pos;
+	iter->pos = end + 1;
+
+	/* Check for a "peeled" line: */
+	if (iter->len >= PEELED_LINE_LENGTH + 1 &&
+	    *iter->pos == '^' &&
+	    !get_oid_hex(iter->pos + 1, &iter->peeled) &&
+	    iter->pos[PEELED_LINE_LENGTH] == '\n') {
+		/*
+		 * Regardless of what the file header said,
+		 * we definitely know the value of *this*
+		 * reference:
+		 */
+		ref_iterator->flags |= REF_KNOWS_PEELED;
+
+		iter->len -= PEELED_LINE_LENGTH + 1;
+		iter->pos += PEELED_LINE_LENGTH + 1;
+	} else {
+		oidclr(&iter->peeled);
+	}
+
+
+	return ITER_OK;
+}
+
+static int mmapped_ref_iterator_peel(struct ref_iterator *ref_iterator,
+				    struct object_id *peeled)
+{
+	struct mmapped_ref_iterator *iter =
+		(struct mmapped_ref_iterator *)ref_iterator;
+
+	if ((ref_iterator->flags & REF_KNOWS_PEELED)) {
+		oidcpy(peeled, &iter->peeled);
+		return is_null_oid(&iter->peeled) ? -1 : 0;
+	} else if ((ref_iterator->flags & (REF_ISBROKEN | REF_ISSYMREF))) {
+		return -1;
+	} else {
+		return !!peel_object(iter->oid.hash, peeled->hash);
+	}
+}
+
+static int mmapped_ref_iterator_abort(struct ref_iterator *ref_iterator)
+{
+	struct mmapped_ref_iterator *iter =
+		(struct mmapped_ref_iterator *)ref_iterator;
+
+	// FIXME: the following line will be needed for general use:
+	//release_packed_ref_cache(iter->cache);
+	strbuf_release(&iter->tmp);
+	base_ref_iterator_free(ref_iterator);
+	return ITER_DONE;
+}
+
+static struct ref_iterator_vtable mmapped_ref_iterator_vtable = {
+	mmapped_ref_iterator_advance,
+	mmapped_ref_iterator_peel,
+	mmapped_ref_iterator_abort
+};
+
+struct ref_iterator *mmapped_ref_iterator_begin(
+		struct packed_ref_cache *cache,
+		const char *pos, size_t len)
+{
+	struct mmapped_ref_iterator *iter = xcalloc(1, sizeof(*iter));
+	struct ref_iterator *ref_iterator = &iter->base;
+
+
+	base_ref_iterator_init(ref_iterator, &mmapped_ref_iterator_vtable);
+
+	iter->cache = cache;
+	// FIXME: the following line will be needed for general use:
+	//acquire_packed_ref_cache(iter->cache);
+	iter->pos = pos;
+	iter->len = len;
+	strbuf_init(&iter->tmp, 0);
+
+	ref_iterator->oid = &iter->oid;
+
+	return ref_iterator;
+}
+
+/*
  * Create and return a `packed_ref_cache` object representing the
  * current contents of the `packed-refs` file for the specified
  * `packed_ref_store`.
@@ -289,14 +424,14 @@ static struct packed_ref_cache *read_packed_refs(struct packed_ref_store *refs)
 {
 	struct packed_ref_cache *cache;
 	struct ref_dir *dir;
-	struct ref_entry *last = NULL;
-	struct strbuf line = STRBUF_INIT;
 	const char *packed_refs_file = packed_packed_refs_path(refs);
 	int fd;
 	struct stat st;
 	char *buf;
 	const char *p, *end;
 	size_t size, len;
+	struct ref_iterator *iter;
+	int ok;
 
 	cache = xcalloc(1, sizeof(*cache));
 	cache->cache = create_ref_cache(&refs->base, NULL);
@@ -333,6 +468,7 @@ static struct packed_ref_cache *read_packed_refs(struct packed_ref_store *refs)
 	/* Process the header line, if present: */
 	if (len && *p == '#') {
 		const char *traits;
+		struct strbuf line = STRBUF_INIT;
 
 		end = memchr(p, '\n', len);
 		if (!end)
@@ -351,64 +487,28 @@ static struct packed_ref_cache *read_packed_refs(struct packed_ref_store *refs)
 
 		len -= end + 1 - p;
 		p = end + 1;
-		strbuf_reset(&line);
+		strbuf_release(&line);
 	}
 
-	while (len) {
-		unsigned char sha1[20];
-		const char *refname;
-		int flag = REF_ISPACKED;
+	iter = mmapped_ref_iterator_begin(cache, p, len);
 
-		end = memchr(p, '\n', len);
-		if (!end)
-			die("packed-refs contents are truncated");
+	while ((ok = ref_iterator_advance(iter)) == ITER_OK) {
+		struct ref_entry *entry =
+			create_ref_entry(iter->refname, iter->oid->hash, iter->flags, 0);
 
-		strbuf_add(&line, p, end - p);
+		if ((iter->flags & REF_KNOWS_PEELED))
+			ref_iterator_peel(iter, &entry->u.value.peeled);
 
-		refname = parse_ref_line(&line, sha1);
-		if (!refname)
-			die("packed-refs contents are malformed");
-
-		if (check_refname_format(refname, REFNAME_ALLOW_ONELEVEL)) {
-			if (!refname_is_safe(refname))
-				die("packed refname is dangerous: %s", refname);
-			hashclr(sha1);
-			flag |= REF_BAD_NAME | REF_ISBROKEN;
-		}
-		last = create_ref_entry(refname, sha1, flag, 0);
-		if (cache->peeled == PEELED_FULLY ||
-		    (cache->peeled == PEELED_TAGS && starts_with(refname, "refs/tags/")))
-			last->flag |= REF_KNOWS_PEELED;
-		add_ref_entry(dir, last);
-
-		/* Skip past that line: */
-		len -= end + 1 - p;
-		p = end + 1;
-		strbuf_reset(&line);
-
-		/* Check for a "peeled" line: */
-		if (len >= PEELED_LINE_LENGTH + 1 &&
-		    *p == '^' &&
-		    !get_sha1_hex(p + 1, sha1) &&
-		    p[PEELED_LINE_LENGTH] == '\n') {
-			hashcpy(last->u.value.peeled.hash, sha1);
-			/*
-			 * Regardless of what the file header said,
-			 * we definitely know the value of *this*
-			 * reference:
-			 */
-			last->flag |= REF_KNOWS_PEELED;
-
-			len -= PEELED_LINE_LENGTH + 1;
-			p += PEELED_LINE_LENGTH + 1;
-		}
+		add_ref_entry(dir, entry);
 	}
+
+	if (ok != ITER_DONE)
+	        die("error reading the packed-refs file");
 
 	if (munmap(buf, size))
 		die("error ummapping packed-refs file: %s", strerror(errno));
 	close(fd);
 
-	strbuf_release(&line);
 	return cache;
 }
 
