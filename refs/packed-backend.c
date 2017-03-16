@@ -56,6 +56,23 @@ struct packed_ref_cache {
 	struct ref_cache *cache;
 
 	/*
+	 * The file descriptor of the `packed-refs` file, open in
+	 * read-only mode, or -1 if it is not open.
+	 */
+	int fd;
+
+	/*
+	 * The contents of the mmapped `packed-refs` file and its
+	 * length. If there were no contents (e.g., because the file
+	 * didn't exist), buf is NULL.
+	 */
+	char *buf;
+	size_t size;
+
+	/* The size of the header line, if any; otherwise, 0: */
+	size_t header_len;
+
+	/*
 	 * What is the peeled state of this cache? (This is usually
 	 * determined from the header of the "packed-refs" file.)
 	 */
@@ -94,6 +111,16 @@ static int release_packed_ref_cache(struct packed_ref_cache *packed_refs)
 	if (!--packed_refs->referrers) {
 		free_ref_cache(packed_refs->cache);
 		stat_validity_clear(&packed_refs->validity);
+
+		if (packed_refs->buf) {
+			if (munmap(packed_refs->buf, packed_refs->size))
+				die("error ummapping packed-refs file: %s",
+				    strerror(errno));
+		}
+
+		if (packed_refs->fd >= 0)
+			close(packed_refs->fd);
+
 		free(packed_refs);
 		return 1;
 	} else {
@@ -369,21 +396,21 @@ static struct ref_iterator_vtable mmapped_ref_iterator_vtable = {
 	mmapped_ref_iterator_abort
 };
 
-struct ref_iterator *mmapped_ref_iterator_begin(
-		struct packed_ref_cache *cache,
-		const char *pos, size_t len)
+struct ref_iterator *mmapped_ref_iterator_begin(struct packed_ref_cache *cache)
 {
 	struct mmapped_ref_iterator *iter = xcalloc(1, sizeof(*iter));
 	struct ref_iterator *ref_iterator = &iter->base;
 
+	if (!cache->buf)
+		return empty_ref_iterator_begin();
 
 	base_ref_iterator_init(ref_iterator, &mmapped_ref_iterator_vtable);
 
 	iter->cache = cache;
 	// FIXME: the following line will be needed for general use:
 	//acquire_packed_ref_cache(iter->cache);
-	iter->pos = pos;
-	iter->len = len;
+	iter->pos = cache->buf + cache->header_len;
+	iter->len = cache->size - cache->header_len;
 	strbuf_init(&iter->tmp, 0);
 
 	ref_iterator->oid = &iter->oid;
@@ -425,25 +452,25 @@ static struct packed_ref_cache *read_packed_refs(struct packed_ref_store *refs)
 	struct packed_ref_cache *cache;
 	struct ref_dir *dir;
 	const char *packed_refs_file = packed_packed_refs_path(refs);
-	int fd;
 	struct stat st;
-	char *buf;
-	const char *p, *end;
-	size_t size, len;
+	const char *end;
 	struct ref_iterator *iter;
 	int ok;
 
 	cache = xcalloc(1, sizeof(*cache));
 	cache->cache = create_ref_cache(&refs->base, NULL);
 	cache->cache->root->flag &= ~REF_INCOMPLETE;
-	fd = open(packed_refs_file, O_RDONLY);
-	if (fd < 0) {
+	cache->fd = open(packed_refs_file, O_RDONLY);
+	if (cache->fd < 0) {
 		if (errno == ENOENT) {
 			/*
 			 * This is OK; it just means that no
 			 * "packed-refs" file has been written yet,
 			 * which is equivalent to it being empty.
 			 */
+			cache->buf = NULL;
+			cache->size = 0;
+			cache->header_len = 0;
 			return cache;
 		} else {
 			die("couldn't read %s: %s",
@@ -451,30 +478,27 @@ static struct packed_ref_cache *read_packed_refs(struct packed_ref_store *refs)
 		}
 	}
 
-	stat_validity_update(&cache->validity, fd);
+	stat_validity_update(&cache->validity, cache->fd);
 
-	if (fstat(fd, &st) < 0)
+	if (fstat(cache->fd, &st) < 0)
 		die("couldn't stat %s: %s", packed_refs_file, strerror(errno));
-	size = xsize_t(st.st_size);
-	buf = xmmap(NULL, size, PROT_READ, MAP_PRIVATE, fd, 0);
+	cache->size = xsize_t(st.st_size);
+	cache->buf = xmmap(NULL, cache->size, PROT_READ, MAP_PRIVATE, cache->fd, 0);
 
 	cache->peeled = PEELED_NONE;
 
 	dir = get_ref_dir(cache->cache->root);
 
-	p = buf;
-	len = size;
-
 	/* Process the header line, if present: */
-	if (len && *p == '#') {
+	if (cache->size && *cache->buf == '#') {
 		const char *traits;
 		struct strbuf line = STRBUF_INIT;
 
-		end = memchr(p, '\n', len);
+		end = memchr(cache->buf, '\n', cache->size);
 		if (!end)
 			die("packed-refs header line is truncated");
 
-		strbuf_add(&line, p, end - p);
+		strbuf_add(&line, cache->buf, end - cache->buf);
 
 		if (!skip_prefix(line.buf, "# pack-refs with:", &traits))
 			die("packed-refs header line is malformed");
@@ -485,12 +509,13 @@ static struct packed_ref_cache *read_packed_refs(struct packed_ref_store *refs)
 			cache->peeled = PEELED_TAGS;
 		/* perhaps other traits later as well */
 
-		len -= end + 1 - p;
-		p = end + 1;
+		cache->header_len = end + 1 - cache->buf;
 		strbuf_release(&line);
+	} else {
+		cache->header_len = 0;
 	}
 
-	iter = mmapped_ref_iterator_begin(cache, p, len);
+	iter = mmapped_ref_iterator_begin(cache);
 
 	while ((ok = ref_iterator_advance(iter)) == ITER_OK) {
 		struct ref_entry *entry =
@@ -504,10 +529,6 @@ static struct packed_ref_cache *read_packed_refs(struct packed_ref_store *refs)
 
 	if (ok != ITER_DONE)
 	        die("error reading the packed-refs file");
-
-	if (munmap(buf, size))
-		die("error ummapping packed-refs file: %s", strerror(errno));
-	close(fd);
 
 	return cache;
 }
