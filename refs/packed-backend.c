@@ -287,6 +287,29 @@ static void parse_packed_ref_record(const char *p, const char *limit,
 	*rest = eol + 1;
 }
 
+/*
+ * If `p` points at the start of a peeled record, parse the peeled
+ * value into `peeled`, set `*rest` to point at the character
+ * following the record, and return zero. Otherwise return a nonzero
+ * value.
+ */
+static int parse_peeled_record(const char *p, const char *limit,
+			       struct object_id *peeled,
+			       const char **rest)
+{
+	if (limit - p < 1 + GIT_SHA1_HEXSZ + 1)
+		return -1;
+	if (*p++ != '^')
+		return -1;
+	if (get_oid_hex(p, peeled))
+		return -1;
+	p += GIT_SHA1_HEXSZ;
+	if (*p++ != '\n')
+		return -1;
+	*rest = p;
+	return 0;
+}
+
 static const char *packed_packed_refs_path(struct packed_ref_store *refs)
 {
 	return refs->packed_refs_path;
@@ -345,10 +368,10 @@ static int mmapped_ref_iterator_advance(struct ref_iterator *ref_iterator)
 	iter->pos = end;
 
 	/* Check for a "peeled" line: */
-	if (iter->len >= PEELED_LINE_LENGTH + 1 &&
-	    *iter->pos == '^' &&
-	    !get_oid_hex(iter->pos + 1, &iter->peeled) &&
-	    iter->pos[PEELED_LINE_LENGTH] == '\n') {
+	if (parse_peeled_record(iter->pos, iter->pos + iter->len,
+				&iter->peeled, &end)) {
+		oidclr(&iter->peeled);
+	} else {
 		/*
 		 * Regardless of what the file header said,
 		 * we definitely know the value of *this*
@@ -356,12 +379,9 @@ static int mmapped_ref_iterator_advance(struct ref_iterator *ref_iterator)
 		 */
 		ref_iterator->flags |= REF_KNOWS_PEELED;
 
-		iter->len -= PEELED_LINE_LENGTH + 1;
-		iter->pos += PEELED_LINE_LENGTH + 1;
-	} else {
-		oidclr(&iter->peeled);
+		iter->len -= end - iter->pos;
+		iter->pos = end;
 	}
-
 
 	return ITER_OK;
 }
