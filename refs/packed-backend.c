@@ -53,8 +53,6 @@ static int ref_resolves_to_object(const char *refname,
  * previous paragraph also increments/decrements the reference count.)
  */
 struct packed_ref_cache {
-	struct ref_cache *cache;
-
 	/*
 	 * The file descriptor of the `packed-refs` file, open in
 	 * read-only mode, or -1 if it is not open.
@@ -129,7 +127,6 @@ static void free_packed_ref_buffer(struct packed_ref_cache *packed_refs)
 static int release_packed_ref_cache(struct packed_ref_cache *packed_refs)
 {
 	if (!--packed_refs->referrers) {
-		free_ref_cache(packed_refs->cache);
 		stat_validity_clear(&packed_refs->validity);
 		free_packed_ref_buffer(packed_refs);
 		free(packed_refs);
@@ -685,17 +682,12 @@ static const char *find_reference_location(struct packed_ref_cache *cache,
 static struct packed_ref_cache *read_packed_refs(struct packed_ref_store *refs)
 {
 	struct packed_ref_cache *cache;
-	struct ref_dir *dir;
 	const char *packed_refs_file = packed_packed_refs_path(refs);
 	struct stat st;
 	const char *end;
-	struct ref_iterator *iter;
 	int sorted = 0;
-	int ok;
 
 	cache = xcalloc(1, sizeof(*cache));
-	cache->cache = create_ref_cache(&refs->base, NULL);
-	cache->cache->root->flag &= ~REF_INCOMPLETE;
 	cache->fd = open(packed_refs_file, O_RDONLY);
 	if (cache->fd < 0) {
 		if (errno == ENOENT) {
@@ -722,8 +714,6 @@ static struct packed_ref_cache *read_packed_refs(struct packed_ref_store *refs)
 	cache->buf = xmmap(NULL, cache->size, PROT_READ, MAP_PRIVATE, cache->fd, 0);
 
 	cache->peeled = PEELED_NONE;
-
-	dir = get_ref_dir(cache->cache->root);
 
 	/* Process the header line, if present: */
 	if (cache->size && *cache->buf == '#') {
@@ -762,23 +752,6 @@ static struct packed_ref_cache *read_packed_refs(struct packed_ref_store *refs)
 
 	if (!sorted)
 		sort_packed_refs(cache);
-
-	iter = mmapped_ref_iterator_begin(cache,
-					  cache->buf + cache->header_len,
-					  cache->size - cache->header_len);
-
-	while ((ok = ref_iterator_advance(iter)) == ITER_OK) {
-		struct ref_entry *entry =
-			create_ref_entry(iter->refname, iter->oid->hash, iter->flags, 0);
-
-		if ((iter->flags & REF_KNOWS_PEELED))
-			ref_iterator_peel(iter, &entry->u.value.peeled);
-
-		add_ref_entry(dir, entry);
-	}
-
-	if (ok != ITER_DONE)
-	        die("error reading the packed-refs file");
 
 	return cache;
 }
