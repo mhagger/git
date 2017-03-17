@@ -16,8 +16,6 @@ struct packed_ref_cache {
 	 */
 	struct packed_ref_store *refs;
 
-	struct ref_cache *cache;
-
 	/*
 	 * The file descriptor of the `packed-refs` file (open in
 	 * read-only mode), or -1 if it is not open.
@@ -123,7 +121,6 @@ static void release_packed_ref_buffer(struct packed_ref_cache *packed_refs)
 static int release_packed_ref_cache(struct packed_ref_cache *packed_refs)
 {
 	if (!--packed_refs->referrers) {
-		free_ref_cache(packed_refs->cache);
 		stat_validity_clear(&packed_refs->validity);
 		release_packed_ref_buffer(packed_refs);
 		free(packed_refs);
@@ -640,15 +637,10 @@ static struct packed_ref_cache *read_packed_refs(struct packed_ref_store *refs)
 	struct packed_ref_cache *packed_refs = xcalloc(1, sizeof(*packed_refs));
 	struct stat st;
 	size_t size;
-	struct ref_dir *dir;
-	struct ref_iterator *iter;
 	int sorted = 0;
-	int ok;
 
 	packed_refs->refs = refs;
 	acquire_packed_ref_cache(packed_refs);
-	packed_refs->cache = create_ref_cache(NULL, NULL);
-	packed_refs->cache->root->flag &= ~REF_INCOMPLETE;
 	packed_refs->peeled = PEELED_NONE;
 
 	packed_refs->fd = open(refs->path, O_RDONLY);
@@ -729,23 +721,6 @@ static struct packed_ref_cache *read_packed_refs(struct packed_ref_store *refs)
 		 */
 		verify_buffer_safe(packed_refs);
 	}
-
-	dir = get_ref_dir(packed_refs->cache->root);
-	iter = mmapped_ref_iterator_begin(
-			packed_refs,
-			packed_refs->buf + packed_refs->header_len,
-			packed_refs->eof);
-	while ((ok = ref_iterator_advance(iter)) == ITER_OK) {
-		struct ref_entry *entry =
-			create_ref_entry(iter->refname, iter->oid, iter->flags);
-
-		if ((iter->flags & REF_KNOWS_PEELED))
-			ref_iterator_peel(iter, &entry->u.value.peeled);
-		add_ref_entry(dir, entry);
-	}
-
-	if (ok != ITER_DONE)
-		die("error reading packed-refs file %s", refs->path);
 
 	return packed_refs;
 }
@@ -905,8 +880,8 @@ static struct ref_iterator *packed_ref_iterator_begin(
 	else
 		start = packed_refs->buf + packed_refs->header_len;
 
-	iter->iter0 = mmapped_ref_iterator_begin(
-			packed_refs, start, packed_refs->eof);
+	iter->iter0 = mmapped_ref_iterator_begin(packed_refs,
+						 start, packed_refs->eof);
 
 	iter->flags = flags;
 
