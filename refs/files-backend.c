@@ -2443,6 +2443,9 @@ struct files_transaction_backend_data {
 	/* True iff the transaction includes any deletions: */
 	unsigned int update_includes_deletions : 1;
 
+	/* True iff the transaction includes and deletions that are not ISPRUNING: */
+	unsigned int update_includes_non_pruning_deletions : 1;
+
 	/* Does this transaction own the packed_refs_store lock? */
 	unsigned int own_packed_refs_lock : 1;
 
@@ -2524,8 +2527,11 @@ static int files_transaction_prepare(struct ref_store *ref_store,
 		 */
 		// FIXME: could we set REF_DELETING here?
 		if ((update->flags & REF_HAVE_NEW) &&
-		    is_null_sha1(update->new_sha1))
+		    is_null_sha1(update->new_sha1)) {
 			data->update_includes_deletions = 1;
+			if (!(update->flags & REF_ISPRUNING))
+				data->update_includes_non_pruning_deletions = 1;
+		}
 	}
 	string_list_sort(&affected_refnames);
 	if (ref_update_reject_duplicates(&affected_refnames, err)) {
@@ -2578,13 +2584,15 @@ static int files_transaction_prepare(struct ref_store *ref_store,
 			data->own_packed_refs_lock = 1;
 		}
 
-		data->packed_transaction =
-			ref_store_transaction_begin(refs->packed_ref_store, err);
-		if (!data->packed_transaction) {
-			strbuf_release(err);
-			strbuf_addstr(err, "unable to initialize packed-refs transaction");
-			ret = TRANSACTION_GENERIC_ERROR;
-			goto cleanup;
+		if (data->update_includes_non_pruning_deletions) {
+			data->packed_transaction =
+				ref_store_transaction_begin(refs->packed_ref_store, err);
+			if (!data->packed_transaction) {
+				strbuf_release(err);
+				strbuf_addstr(err, "unable to initialize packed-refs transaction");
+				ret = TRANSACTION_GENERIC_ERROR;
+				goto cleanup;
+			}
 		}
 	}
 
