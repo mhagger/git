@@ -103,6 +103,26 @@ static void acquire_packed_ref_cache(struct packed_ref_cache *packed_refs)
 }
 
 /*
+ * Free the buffer in `packed_refs`. If necessary, munmap the memory
+ * first and close the file.
+ */
+static void free_packed_ref_buffer(struct packed_ref_cache *packed_refs)
+{
+	if (packed_refs->fd >= 0) {
+		if (munmap(packed_refs->buf, packed_refs->size))
+			die("error ummapping packed-refs file: %s",
+			    strerror(errno));
+		close(packed_refs->fd);
+		packed_refs->fd = -1;
+	} else {
+		free(packed_refs->buf);
+	}
+	packed_refs->buf = NULL;
+	packed_refs->size = 0;
+	packed_refs->header_len = 0;
+}
+
+/*
  * Decrease the reference count of *packed_refs. If it goes to zero,
  * free *packed_refs and return true; otherwise return false.
  */
@@ -111,16 +131,7 @@ static int release_packed_ref_cache(struct packed_ref_cache *packed_refs)
 	if (!--packed_refs->referrers) {
 		free_ref_cache(packed_refs->cache);
 		stat_validity_clear(&packed_refs->validity);
-
-		if (packed_refs->buf) {
-			if (munmap(packed_refs->buf, packed_refs->size))
-				die("error ummapping packed-refs file: %s",
-				    strerror(errno));
-		}
-
-		if (packed_refs->fd >= 0)
-			close(packed_refs->fd);
-
+		free_packed_ref_buffer(packed_refs);
 		free(packed_refs);
 		return 1;
 	} else {
@@ -247,7 +258,7 @@ static struct packed_ref_store *packed_downcast(struct ref_store *ref_store,
  * traits will be added later.  The trailing space is required.
  */
 static const char PACKED_REFS_HEADER[] =
-	"# pack-refs with: peeled fully-peeled \n";
+	"# pack-refs with: peeled fully-peeled sorted \n";
 
 /*
  * Parse one line from a packed-refs file.  Write the SHA1 to sha1.
@@ -420,6 +431,111 @@ struct ref_iterator *mmapped_ref_iterator_begin(
 	return ref_iterator;
 }
 
+struct packed_ref_entry {
+	const char *start;
+	size_t len;
+};
+
+static int cmp_packed_ref_entries(const void *v1, const void *v2)
+{
+	const struct packed_ref_entry *e1 = v1, *e2 = v2;
+	const char *r1 = e1->start + GIT_SHA1_HEXSZ + 1;
+	const char *r2 = e2->start + GIT_SHA1_HEXSZ + 1;
+
+	while (1) {
+		if (*r1 == '\n')
+			return *r2 == '\n' ? 0 : -1;
+		if (*r1 != *r2) {
+			if (*r2 == '\n')
+				return 1;
+			else
+				return *(const unsigned char *)r1 -
+					*(const unsigned char *)r2;
+		}
+		r1++;
+		r2++;
+	}
+}
+
+/*
+ * `cache->buf` is not known to be sorted. Check whether it is, and if
+ * not, sort it into new memory and munmap/free the old storage.
+ */
+static void sort_packed_refs(struct packed_ref_cache *cache)
+{
+	struct packed_ref_entry *entries = NULL;
+	size_t alloc = 0, nr = 0;
+	int unsorted = 0;
+	const char *pos = cache->buf + cache->header_len;
+	const char *limit = cache->buf + cache->size;
+	size_t len = limit - pos;
+	const char *end;
+	char *new_buffer, *dst;
+	size_t i;
+
+	if (!len)
+		return;
+
+	/*
+	 * Initialize entries based on a crude estimate of the number
+	 * of references in the file (we'll grow it below if needed):
+	 */
+	ALLOC_GROW(entries, len / 80 + 1, alloc);
+
+	for (pos = cache->buf + cache->header_len; pos < limit; pos = end) {
+		end = memchr(pos, '\n', limit - pos);
+		if (!end || end - pos < GIT_SHA1_HEXSZ + 2)
+			die("packed-refs contents are truncated");
+		end++;
+		if (end < limit && *end == '^') {
+			/* Keep any peeled line with its reference: */
+			end = memchr(end, '\n', limit - end);
+			if (!end)
+				die("packed-refs contents are truncated");
+			end++;
+		}
+
+		ALLOC_GROW(entries, nr + 1, alloc);
+		entries[nr].start = pos;
+		entries[nr].len = end - pos;
+		nr++;
+
+		if (!unsorted &&
+		    nr > 1 &&
+		    cmp_packed_ref_entries(&entries[nr - 2],
+					   &entries[nr - 1]) >= 0)
+			unsorted = 1;
+	}
+
+	if (!unsorted)
+		goto cleanup;
+
+	/* We need to sort the memory. First we sort the entries array: */
+	QSORT(entries, nr, cmp_packed_ref_entries);
+
+	/*
+	 * Allocate a new chunk of memory, and copy the old memory to
+	 * the new in the order indicated by `entries`:
+	 */
+	new_buffer = xmalloc(cache->size - cache->header_len);
+	for (dst = new_buffer, i = 0; i < nr; i++) {
+		memcpy(dst, entries[i].start, entries[i].len);
+		dst += entries[i].len;
+	}
+
+	/*
+	 * Now ummap the old buffer and use the sorted buffer in its
+	 * place:
+	 */
+	free_packed_ref_buffer(cache);
+	cache->buf = new_buffer;
+	cache->size = len;
+	cache->header_len = 0;
+
+cleanup:
+	free(entries);
+}
+
 /*
  * Create and return a `packed_ref_cache` object representing the
  * current contents of the `packed-refs` file for the specified
@@ -457,6 +573,7 @@ static struct packed_ref_cache *read_packed_refs(struct packed_ref_store *refs)
 	struct stat st;
 	const char *end;
 	struct ref_iterator *iter;
+	int sorted = 0;
 	int ok;
 
 	cache = xcalloc(1, sizeof(*cache));
@@ -510,12 +627,17 @@ static struct packed_ref_cache *read_packed_refs(struct packed_ref_store *refs)
 		else if (strstr(traits, " peeled "))
 			cache->peeled = PEELED_TAGS;
 		/* perhaps other traits later as well */
+		if (strstr(traits, " sorted "))
+			sorted = 1;
 
 		cache->header_len = end + 1 - cache->buf;
 		strbuf_release(&line);
 	} else {
 		cache->header_len = 0;
 	}
+
+	if (!sorted)
+		sort_packed_refs(cache);
 
 	iter = mmapped_ref_iterator_begin(cache,
 					  cache->buf + cache->header_len,
