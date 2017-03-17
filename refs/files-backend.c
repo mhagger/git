@@ -1725,10 +1725,9 @@ retry:
 				goto error_return;
 			} else if (remove_dir_recursively(&ref_file,
 							  REMOVE_DIR_EMPTY_ONLY)) {
-				if (verify_refname_available_dir(
-						    refname, extras, skip,
-						    get_loose_refs(refs),
-						    err)) {
+				if (refs_verify_refname_available(
+						    &refs->base, refname,
+						    extras, skip, err)) {
 					/*
 					 * The error message set by
 					 * verify_refname_available() is OK.
@@ -2097,9 +2096,9 @@ static struct ref_lock *lock_ref_sha1_basic(struct files_ref_store *refs,
 		 */
 		if (remove_empty_directories(&ref_file)) {
 			last_errno = errno;
-			if (!verify_refname_available_dir(
-					    refname, extras, skip,
-					    get_loose_refs(refs), err))
+			if (!refs_verify_refname_available(
+					    &refs->base,
+					    refname, extras, skip, err))
 				strbuf_addf(err, "there are still refs under '%s'",
 					    refname);
 			goto error_return;
@@ -2111,9 +2110,8 @@ static struct ref_lock *lock_ref_sha1_basic(struct files_ref_store *refs,
 	if (!resolved) {
 		last_errno = errno;
 		if (last_errno != ENOTDIR ||
-		    !verify_refname_available_dir(
-				    refname, extras, skip,
-				    get_loose_refs(refs), err))
+		    !refs_verify_refname_available(&refs->base, refname,
+						   extras, skip, err))
 			strbuf_addf(err, "unable to resolve reference '%s': %s",
 				    refname, strerror(last_errno));
 
@@ -2607,26 +2605,6 @@ static int rename_tmp_log(struct files_ref_store *refs, const char *newrefname)
 	strbuf_release(&path);
 	strbuf_release(&tmp);
 	return ret;
-}
-
-static int files_verify_refname_available(struct ref_store *ref_store,
-					  const char *newname,
-					  const struct string_list *extras,
-					  const struct string_list *skip,
-					  struct strbuf *err)
-{
-	struct files_ref_store *refs =
-		files_downcast(ref_store, REF_STORE_READ, "verify_refname_available");
-	struct ref_dir *packed_refs = get_packed_refs(refs);
-	struct ref_dir *loose_refs = get_loose_refs(refs);
-
-	if (verify_refname_available_dir(newname, extras, skip,
-					 packed_refs, err) ||
-	    verify_refname_available_dir(newname, extras, skip,
-					 loose_refs, err))
-		return -1;
-
-	return 0;
 }
 
 static int write_ref_to_lockfile(struct ref_lock *lock,
@@ -4291,7 +4269,6 @@ struct ref_storage_be refs_be_files = {
 
 	files_ref_iterator_begin,
 	files_read_raw_ref,
-	files_verify_refname_available,
 
 	files_reflog_iterator_begin,
 	files_for_each_reflog_ent,
