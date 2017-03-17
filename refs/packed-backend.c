@@ -261,32 +261,30 @@ static const char PACKED_REFS_HEADER[] =
 	"# pack-refs with: peeled fully-peeled sorted \n";
 
 /*
- * Parse one line from a packed-refs file.  Write the SHA1 to sha1.
- * Return a pointer to the refname within the line (null-terminated),
- * or NULL if there was a problem.
+ * Parse the packed reference record that starts at `p` (in a buffer
+ * whose last character is at `limit - 1`). Write the reference name
+ * (unchecked) to `refname` (overwriting any previous contents) and
+ * its value to `oid`. Set `*rest` to point at the character following
+ * the record. Die on errors.
  */
-static const char *parse_ref_line(struct strbuf *line, unsigned char *sha1)
+static void parse_packed_ref_record(const char *p, const char *limit,
+				    struct strbuf *refname,
+				    struct object_id *oid,
+				    const char **rest)
 {
-	const char *ref;
+	const char *eol;
 
-	/*
-	 * Verify that the line is at least long enough to hold a
-	 * SHA-1 in hex representation plus a space plus a non-empty
-	 * reference name:
-	 */
-	if (line->len < GIT_SHA1_HEXSZ + 2)
-		return NULL;
-
-	if (get_sha1_hex(line->buf, sha1) < 0)
-		return NULL;
-	if (!isspace(line->buf[GIT_SHA1_HEXSZ]))
-		return NULL;
-
-	ref = line->buf + GIT_SHA1_HEXSZ + 1;
-	if (isspace(*ref))
-		return NULL;
-
-	return ref;
+	if (limit - p < GIT_SHA1_HEXSZ + 3)
+		die("packed-refs file is truncated");
+	if (get_oid_hex(p, oid) || !isspace(p[GIT_SHA1_HEXSZ]))
+		die("packed-refs file is malformed");
+	p += GIT_SHA1_HEXSZ + 1;
+	eol = memchr(p, '\n', limit - p);
+	if (!eol)
+		die("packed-refs file is truncated");
+	strbuf_reset(refname);
+	strbuf_add(refname, p, eol - p);
+	*rest = eol + 1;
 }
 
 static const char *packed_packed_refs_path(struct packed_ref_store *refs)
@@ -326,15 +324,10 @@ static int mmapped_ref_iterator_advance(struct ref_iterator *ref_iterator)
 
 	ref_iterator->flags = REF_ISPACKED;
 
-	end = memchr(iter->pos, '\n', iter->len);
-	if (!end)
-		die("packed-refs contents are truncated");
+	parse_packed_ref_record(iter->pos, iter->pos + iter->len,
+				&iter->tmp, &iter->oid, &end);
 
-	strbuf_add(&iter->tmp, iter->pos, end - iter->pos);
-
-	ref_iterator->refname = parse_ref_line(&iter->tmp, iter->oid.hash);
-	if (!ref_iterator->refname)
-		die("packed-refs contents are malformed");
+	ref_iterator->refname = iter->tmp.buf;
 
 	if (check_refname_format(ref_iterator->refname, REFNAME_ALLOW_ONELEVEL)) {
 		if (!refname_is_safe(ref_iterator->refname))
@@ -348,8 +341,8 @@ static int mmapped_ref_iterator_advance(struct ref_iterator *ref_iterator)
 		ref_iterator->flags |= REF_KNOWS_PEELED;
 
 	/* Skip past that line: */
-	iter->len -= end + 1 - iter->pos;
-	iter->pos = end + 1;
+	iter->len -= end - iter->pos;
+	iter->pos = end;
 
 	/* Check for a "peeled" line: */
 	if (iter->len >= PEELED_LINE_LENGTH + 1 &&
@@ -797,52 +790,28 @@ static struct packed_ref_cache *get_packed_ref_cache(struct packed_ref_store *re
 	return refs->cache;
 }
 
-/*
- * Return the `ref_dir` for the specified `packed_ref_cache` (which
- * might not be the current one).
- */
-static struct ref_dir *get_packed_ref_dir(struct packed_ref_cache *packed_ref_cache)
-{
-	return get_ref_dir(packed_ref_cache->cache->root);
-}
-
-/*
- * Return the `ref_dir` for the current `packed_ref_cache` for the
- * specified `packed_ref_store` (freshening it if needed).
- */
-static struct ref_dir *get_packed_refs(struct packed_ref_store *refs)
-{
-	return get_packed_ref_dir(get_packed_ref_cache(refs));
-}
-
-/*
- * Return the ref_entry for the given refname from the packed
- * references.  If it does not exist, return NULL.
- */
-static struct ref_entry *get_packed_ref(struct packed_ref_store *refs,
-					const char *refname)
-{
-	return find_ref_entry(get_packed_refs(refs), refname);
-}
-
 static int packed_read_raw_ref(struct ref_store *ref_store,
 			      const char *refname, unsigned char *sha1,
 			      struct strbuf *referent, unsigned int *type)
 {
 	struct packed_ref_store *refs =
 		packed_downcast(ref_store, REF_STORE_READ, "read_raw_ref");
-	struct ref_entry *entry;
+	struct packed_ref_cache *cache = get_packed_ref_cache(refs);
+	const char *rec;
 
 	*type = 0;
 
-	entry = get_packed_ref(refs, refname);
-	if (!entry) {
+	rec = find_reference_location(cache, refname, 1);
+
+	if (!rec) {
 		/* refname is not a packed reference. */
 		errno = ENOENT;
 		return -1;
 	}
 
-	hashcpy(sha1, entry->u.value.oid.hash);
+	if (get_sha1_hex(rec, sha1))
+		die("packed-refs file is malformed");
+
 	*type = REF_ISPACKED;
 	return 0;
 }
