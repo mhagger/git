@@ -396,7 +396,9 @@ static struct ref_iterator_vtable mmapped_ref_iterator_vtable = {
 	mmapped_ref_iterator_abort
 };
 
-struct ref_iterator *mmapped_ref_iterator_begin(struct packed_ref_cache *cache)
+struct ref_iterator *mmapped_ref_iterator_begin(
+		struct packed_ref_cache *cache,
+		const char *buf, size_t size)
 {
 	struct mmapped_ref_iterator *iter = xcalloc(1, sizeof(*iter));
 	struct ref_iterator *ref_iterator = &iter->base;
@@ -409,8 +411,8 @@ struct ref_iterator *mmapped_ref_iterator_begin(struct packed_ref_cache *cache)
 	iter->cache = cache;
 	// FIXME: the following line will be needed for general use:
 	//acquire_packed_ref_cache(iter->cache);
-	iter->pos = cache->buf + cache->header_len;
-	iter->len = cache->size - cache->header_len;
+	iter->pos = buf;
+	iter->len = size;
 	strbuf_init(&iter->tmp, 0);
 
 	ref_iterator->oid = &iter->oid;
@@ -515,7 +517,9 @@ static struct packed_ref_cache *read_packed_refs(struct packed_ref_store *refs)
 		cache->header_len = 0;
 	}
 
-	iter = mmapped_ref_iterator_begin(cache);
+	iter = mmapped_ref_iterator_begin(cache,
+					  cache->buf + cache->header_len,
+					  cache->size - cache->header_len);
 
 	while ((ok = ref_iterator_advance(iter)) == ITER_OK) {
 		struct ref_entry *entry =
