@@ -25,9 +25,12 @@ struct packed_ref_cache {
 	int fd;
 
 	/*
-	 * The range of memory to which the `packed-refs` file is
-	 * mmapped. If there were no contents (e.g., because the file
-	 * didn't exist), `buf` and `eof` are both NULL.
+	 * The contents of the `packed-refs` file. If the file was
+	 * already sorted, this points at the mmapped contents of the
+	 * file. If not, this points at heap-allocated memory
+	 * containing the contents, sorted. If there were no contents
+	 * (e.g., because the file didn't exist), `buf` and `eof` are
+	 * both NULL.
 	 */
 	char *buf, *eof;
 
@@ -93,22 +96,24 @@ static void acquire_packed_ref_cache(struct packed_ref_cache *packed_refs)
 }
 
 /*
- * If the buffer in `packed_refs` is active, munmap the memory, close the
- * file, and set the buffer pointers to NULL.
+ * If the buffer in `packed_refs` is active, then either munmap the
+ * memory and close the file, or free the memory. Then set the buffer
+ * pointers to NULL.
  */
 static void release_packed_ref_buffer(struct packed_ref_cache *packed_refs)
 {
-	if (packed_refs->buf) {
+	if (packed_refs->fd >= 0) {
 		if (munmap(packed_refs->buf,
 			   packed_refs->eof - packed_refs->buf))
 			die_errno("error ummapping packed-refs file %s",
 				  packed_refs->refs->path);
-		packed_refs->buf = packed_refs->eof = NULL;
-		packed_refs->header_len = 0;
-	}
-
-	if (packed_refs->fd >= 0)
 		close(packed_refs->fd);
+		packed_refs->fd = -1;
+	} else {
+		free(packed_refs->buf);
+	}
+	packed_refs->buf = packed_refs->eof = NULL;
+	packed_refs->header_len = 0;
 }
 
 /*
@@ -329,7 +334,7 @@ struct ref_iterator *mmapped_ref_iterator_begin(
 	if (!packed_refs->buf)
 		return empty_ref_iterator_begin();
 
-	base_ref_iterator_init(ref_iterator, &mmapped_ref_iterator_vtable, 0);
+	base_ref_iterator_init(ref_iterator, &mmapped_ref_iterator_vtable, 1);
 
 	iter->packed_refs = packed_refs;
 	acquire_packed_ref_cache(iter->packed_refs);
@@ -342,6 +347,170 @@ struct ref_iterator *mmapped_ref_iterator_begin(
 	return ref_iterator;
 }
 
+struct packed_ref_entry {
+	const char *start;
+	size_t len;
+};
+
+static int cmp_packed_ref_entries(const void *v1, const void *v2)
+{
+	const struct packed_ref_entry *e1 = v1, *e2 = v2;
+	const char *r1 = e1->start + GIT_SHA1_HEXSZ + 1;
+	const char *r2 = e2->start + GIT_SHA1_HEXSZ + 1;
+
+	while (1) {
+		if (*r1 == '\n')
+			return *r2 == '\n' ? 0 : -1;
+		if (*r1 != *r2) {
+			if (*r2 == '\n')
+				return 1;
+			else
+				return (unsigned char)*r1 < (unsigned char)*r2 ? -1 : +1;
+		}
+		r1++;
+		r2++;
+	}
+}
+
+/*
+ * `packed_refs->buf` is not known to be sorted. Check whether it is,
+ * and if not, sort it into new memory and munmap/free the old
+ * storage.
+ */
+static void sort_packed_refs(struct packed_ref_cache *packed_refs)
+{
+	struct packed_ref_entry *entries = NULL;
+	size_t alloc = 0, nr = 0;
+	int sorted = 1;
+	const char *pos, *eof, *eol;
+	size_t len, i;
+	char *new_buffer, *dst;
+
+	pos = packed_refs->buf + packed_refs->header_len;
+	eof = packed_refs->eof;
+	len = eof - pos;
+
+	if (!len)
+		return;
+
+	/*
+	 * Initialize entries based on a crude estimate of the number
+	 * of references in the file (we'll grow it below if needed):
+	 */
+	ALLOC_GROW(entries, len / 80 + 20, alloc);
+
+	while (pos < eof) {
+		eol = memchr(pos, '\n', eof - pos);
+		if (!eol)
+			/* The safety check should prevent this. */
+			BUG("unterminated line found in packed-refs");
+		if (eol - pos < GIT_SHA1_HEXSZ + 2)
+			die_invalid_line(packed_refs->refs->path,
+					 pos, eof - pos);
+		eol++;
+		if (eol < eof && *eol == '^') {
+			/*
+			 * Keep any peeled line together with its
+			 * reference:
+			 */
+			const char *peeled_start = eol;
+
+			eol = memchr(peeled_start, '\n', eof - peeled_start);
+			if (!eol)
+				/* The safety check should prevent this. */
+				BUG("unterminated peeled line found in packed-refs");
+			eol++;
+		}
+
+		ALLOC_GROW(entries, nr + 1, alloc);
+		entries[nr].start = pos;
+		entries[nr].len = eol - pos;
+		nr++;
+
+		if (sorted &&
+		    nr > 1 &&
+		    cmp_packed_ref_entries(&entries[nr - 2],
+					   &entries[nr - 1]) >= 0)
+			sorted = 0;
+
+		pos = eol;
+	}
+
+	if (sorted)
+		goto cleanup;
+
+	/* We need to sort the memory. First we sort the entries array: */
+	QSORT(entries, nr, cmp_packed_ref_entries);
+
+	/*
+	 * Allocate a new chunk of memory, and copy the old memory to
+	 * the new in the order indicated by `entries` (not bothering
+	 * with the header line):
+	 */
+	new_buffer = xmalloc(len);
+	for (dst = new_buffer, i = 0; i < nr; i++) {
+		memcpy(dst, entries[i].start, entries[i].len);
+		dst += entries[i].len;
+	}
+
+	/*
+	 * Now munmap the old buffer and use the sorted buffer in its
+	 * place:
+	 */
+	release_packed_ref_buffer(packed_refs);
+	packed_refs->buf = new_buffer;
+	packed_refs->eof = new_buffer + len;
+	packed_refs->header_len = 0;
+
+cleanup:
+	free(entries);
+}
+
+/*
+ * Return a pointer to the start of the record that contains the
+ * character `*p` (which must be within the buffer). If no other
+ * record start is found, return `buf`.
+ */
+static const char *find_start_of_record(const char *buf, const char *p)
+{
+	while (p > buf && (p[-1] != '\n' || p[0] == '^'))
+		p--;
+	return p;
+}
+
+/*
+ * We want to be able to compare mmapped reference records quickly,
+ * without totally parsing them. We can do so because the records are
+ * LF-terminated, and the refname should start exactly (GIT_SHA1_HEXSZ
+ * + 1) bytes past the beginning of the record.
+ *
+ * But what if the `packed-refs` file contains garbage? We're willing
+ * to tolerate not detecting the problem, as long as we don't produce
+ * totally garbled output (we can't afford to check the integrity of
+ * the whole file during every Git invocation). But we do want to be
+ * sure that we never read past the end of the buffer in memory and
+ * perform an illegal memory access.
+ *
+ * Guarantee that minimum level of safety by verifying that the last
+ * record in the file is LF-terminated, and that it has at least
+ * (GIT_SHA1_HEXSZ + 1) characters before the LF. Die if either of
+ * these checks fails.
+ */
+static void verify_buffer_safe(struct packed_ref_cache *packed_refs)
+{
+	const char *buf = packed_refs->buf + packed_refs->header_len;
+	const char *eof = packed_refs->eof;
+	const char *last_line;
+
+	if (buf == eof)
+		return;
+
+	last_line = find_start_of_record(buf, eof - 1);
+	if (*(eof - 1) != '\n' || eof - last_line < GIT_SHA1_HEXSZ + 2)
+		die_invalid_line(packed_refs->refs->path,
+				 last_line, eof - last_line);
+}
+
 /*
  * Read from the `packed-refs` file into a newly-allocated
  * `packed_ref_cache` and return it. The return value will already
@@ -350,19 +519,19 @@ struct ref_iterator *mmapped_ref_iterator_begin(
  * A comment line of the form "# pack-refs with: " may contain zero or
  * more traits. We interpret the traits as follows:
  *
- *   No traits:
+ *   Neither `peeled` nor `fully-peeled`:
  *
  *      Probably no references are peeled. But if the file contains a
  *      peeled value for a reference, we will use it.
  *
- *   peeled:
+ *   `peeled`:
  *
  *      References under "refs/tags/", if they *can* be peeled, *are*
  *      peeled in this file. References outside of "refs/tags/" are
  *      probably not peeled even if they could have been, but if we find
  *      a peeled value for such a reference we will use it.
  *
- *   fully-peeled:
+ *   `fully-peeled`:
  *
  *      All references in the file that can be peeled are peeled.
  *      Inversely (and this is more important), any references in the
@@ -370,6 +539,10 @@ struct ref_iterator *mmapped_ref_iterator_begin(
  *      trait should typically be written alongside "peeled" for
  *      compatibility with older clients, but we do not require it
  *      (i.e., "peeled" is a no-op if "fully-peeled" is set).
+ *
+ *   `sorted`:
+ *
+ *      The references in this file are known to be sorted by refname.
  */
 static struct packed_ref_cache *read_packed_refs(struct packed_ref_store *refs)
 {
@@ -378,6 +551,7 @@ static struct packed_ref_cache *read_packed_refs(struct packed_ref_store *refs)
 	size_t size;
 	struct ref_dir *dir;
 	struct ref_iterator *iter;
+	int sorted = 0;
 	int ok;
 
 	packed_refs->refs = refs;
@@ -440,6 +614,9 @@ static struct packed_ref_cache *read_packed_refs(struct packed_ref_store *refs)
 			packed_refs->peeled = PEELED_FULLY;
 		else if (unsorted_string_list_has_string(&traits, "peeled"))
 			packed_refs->peeled = PEELED_TAGS;
+
+		sorted = unsorted_string_list_has_string(&traits, "sorted");
+
 		/* perhaps other traits later as well */
 
 		/* The "+ 1" is for the LF character. */
@@ -447,6 +624,19 @@ static struct packed_ref_cache *read_packed_refs(struct packed_ref_store *refs)
 
 		string_list_clear(&traits, 0);
 		strbuf_release(&tmp);
+	}
+
+	verify_buffer_safe(packed_refs);
+
+	if (!sorted) {
+		sort_packed_refs(packed_refs);
+
+		/*
+		 * Reordering the records might have moved a short one
+		 * to the end of the buffer, so verify the buffer's
+		 * safety again:
+		 */
+		verify_buffer_safe(packed_refs);
 	}
 
 	dir = get_ref_dir(packed_refs->cache->root);
@@ -752,7 +942,7 @@ int packed_refs_is_locked(struct ref_store *ref_store)
  * the colon and the trailing space are required.
  */
 static const char PACKED_REFS_HEADER[] =
-	"# pack-refs with: peeled fully-peeled \n";
+	"# pack-refs with: peeled fully-peeled sorted \n";
 
 static int packed_init_db(struct ref_store *ref_store, struct strbuf *err)
 {
