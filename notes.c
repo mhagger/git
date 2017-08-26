@@ -406,7 +406,7 @@ static void load_subtree(struct notes_tree *t, struct leaf_node *subtree,
 		struct int_node *node, unsigned int n)
 {
 	struct object_id object_oid;
-	unsigned int prefix_len;
+	size_t prefix_len;
 	void *buf;
 	struct tree_desc desc;
 	struct name_entry entry;
@@ -418,14 +418,14 @@ static void load_subtree(struct notes_tree *t, struct leaf_node *subtree,
 
 	prefix_len = subtree->key_oid.hash[KEY_INDEX];
 	if (prefix_len >= GIT_SHA1_RAWSZ)
-		BUG("prefix_len (%u) is out of range", prefix_len);
+		BUG("prefix_len (%"PRIuMAX") is out of range", (uintmax_t)prefix_len);
 	if (prefix_len * 2 < n)
-		BUG("prefix_len (%u) is too small", prefix_len);
+		BUG("prefix_len (%"PRIuMAX") is too small", (uintmax_t)prefix_len);
 	memcpy(object_oid.hash, subtree->key_oid.hash, prefix_len);
 	while (tree_entry(&desc, &entry)) {
 		unsigned char type;
 		struct leaf_node *l;
-		int path_len = strlen(entry.path);
+		size_t path_len = strlen(entry.path);
 
 		if (path_len == 2 * (GIT_SHA1_RAWSZ - prefix_len)) {
 			/* This is potentially the remainder of the SHA-1 */
@@ -489,7 +489,7 @@ handle_non_note:
 		{
 			struct strbuf non_note_path = STRBUF_INIT;
 			const char *q = oid_to_hex(&subtree->key_oid);
-			int i;
+			size_t i;
 			for (i = 0; i < prefix_len; i++) {
 				strbuf_addch(&non_note_path, *q++);
 				strbuf_addch(&non_note_path, *q++);
