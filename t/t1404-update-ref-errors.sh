@@ -404,4 +404,75 @@ test_expect_success 'broken reference blocks indirect create' '
 	test_cmp expected output.err
 '
 
+test_expect_failure 'no bogus intermediate values during delete' '
+	prefix=refs/slow-transaction &&
+	# Set up a reference with differing loose and packed versions:
+	git update-ref $prefix/foo $C &&
+	git pack-refs --all &&
+	git update-ref $prefix/foo $D &&
+	git for-each-ref $prefix >unchanged &&
+	# Now try to update the reference, but hold the `packed-refs` lock
+	# for a while to see what happens while the process is blocked:
+	: >.git/packed-refs.lock &&
+	test_when_finished "rm -f .git/packed-refs.lock" &&
+	{
+		sleep 1 &&
+		rm -f .git/packed-refs.lock &
+	} &&
+	pid1=$! &&
+	{
+		# Note: the following command is intentionally run in the
+		# background. We extend the timeout so that `update-ref`
+		# tries to acquire the `packed-refs` lock longer than it
+		# takes the background process above to delete it:
+		git -c core.packedrefstimeout=2000 update-ref -d $prefix/foo &
+	} &&
+	pid2=$! &&
+	ok=true &&
+	while kill -0 $pid2 2>/dev/null
+	do
+		sha1=$(git rev-parse --verify --quiet $prefix/foo || echo undefined) &&
+		case "$sha1" in
+		$D)
+			# This is OK; it just means that nothing has happened yet.
+			: ;;
+		undefined)
+			# This is OK; it means the deletion was successful.
+			: ;;
+		$C)
+			# This value should never be seen. Probably the loose
+			# reference has been deleted but the packed reference
+			# is still there:
+			echo "$prefix/foo incorrectly observed to be C" &&
+			break
+			;;
+		*)
+			# WTF?
+			echo "$prefix/foo unexpected value observed: $sha1" &&
+			break
+			;;
+		esac
+	done >out &&
+	wait $pid1 &&
+	wait $pid2 &&
+	test_must_be_empty out &&
+	test_must_fail git rev-parse --verify --quiet $prefix/foo
+'
+
+test_expect_failure 'delete fails cleanly if packed-refs file is locked' '
+	prefix=refs/locked-packed-refs &&
+	# Set up a reference with differing loose and packed versions:
+	git update-ref $prefix/foo $C &&
+	git pack-refs --all &&
+	git update-ref $prefix/foo $D &&
+	git for-each-ref $prefix >unchanged &&
+	# Now try to delete it while the `packed-refs` lock is held:
+	: >.git/packed-refs.lock &&
+	test_when_finished "rm -f .git/packed-refs.lock" &&
+	test_must_fail git update-ref -d $prefix/foo >out 2>err &&
+	git for-each-ref $prefix >actual &&
+	grep "Unable to create $Q.*packed-refs.lock$Q: File exists" err &&
+	test_cmp unchanged actual
+'
+
 test_done
