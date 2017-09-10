@@ -426,8 +426,14 @@ static void load_subtree(struct notes_tree *t, struct leaf_node *subtree,
 		unsigned char type;
 		struct leaf_node *l;
 		size_t path_len = strlen(entry.path);
+		size_t path_bytes;
 
-		if (path_len == 2 * (GIT_SHA1_RAWSZ - prefix_len)) {
+		if (path_len % 2 != 0)
+			/* Path chunks must come in pairs of hex characters */
+			goto handle_non_note;
+
+		path_bytes = path_len / 2;
+		if (path_bytes == GIT_SHA1_RAWSZ - prefix_len) {
 			/* This is potentially the remainder of the SHA-1 */
 
 			if (!S_ISREG(entry.mode))
@@ -439,7 +445,7 @@ static void load_subtree(struct notes_tree *t, struct leaf_node *subtree,
 				goto handle_non_note; /* entry.path is not a SHA1 */
 
 			type = PTR_TYPE_NOTE;
-		} else if (path_len == 2) {
+		} else if (path_bytes == 1) {
 			/* This is potentially an internal node */
 			size_t len = prefix_len;
 
