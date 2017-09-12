@@ -19,6 +19,22 @@ struct packed_ref_cache {
 	struct ref_cache *cache;
 
 	/*
+	 * The file descriptor of the `packed-refs` file (open in
+	 * read-only mode), or -1 if it is not open.
+	 */
+	int fd;
+
+	/*
+	 * The range of memory to which the `packed-refs` file is
+	 * mmapped. If there were no contents (e.g., because the file
+	 * didn't exist), `buf` and `eof` are both NULL.
+	 */
+	char *buf, *eof;
+
+	/* The size of the header line, if any; otherwise, 0: */
+	size_t header_len;
+
+	/*
 	 * What is the peeled state of this cache? (This is usually
 	 * determined from the header of the "packed-refs" file.)
 	 */
@@ -35,30 +51,6 @@ struct packed_ref_cache {
 	/* The metadata from when this packed-refs cache was read */
 	struct stat_validity validity;
 };
-
-/*
- * Increment the reference count of *packed_refs.
- */
-static void acquire_packed_ref_cache(struct packed_ref_cache *packed_refs)
-{
-	packed_refs->referrers++;
-}
-
-/*
- * Decrease the reference count of *packed_refs.  If it goes to zero,
- * free *packed_refs and return true; otherwise return false.
- */
-static int release_packed_ref_cache(struct packed_ref_cache *packed_refs)
-{
-	if (!--packed_refs->referrers) {
-		free_ref_cache(packed_refs->cache);
-		stat_validity_clear(&packed_refs->validity);
-		free(packed_refs);
-		return 1;
-	} else {
-		return 0;
-	}
-}
 
 /*
  * A container for `packed-refs`-related data. It is not (yet) a
@@ -91,6 +83,50 @@ struct packed_ref_store {
 	 */
 	struct tempfile tempfile;
 };
+
+/*
+ * Increment the reference count of *packed_refs.
+ */
+static void acquire_packed_ref_cache(struct packed_ref_cache *packed_refs)
+{
+	packed_refs->referrers++;
+}
+
+/*
+ * If the buffer in `packed_refs` is active, munmap the memory, close the
+ * file, and set the buffer pointers to NULL.
+ */
+static void release_packed_ref_buffer(struct packed_ref_cache *packed_refs)
+{
+	if (packed_refs->buf) {
+		if (munmap(packed_refs->buf,
+			   packed_refs->eof - packed_refs->buf))
+			die_errno("error ummapping packed-refs file %s",
+				  packed_refs->refs->path);
+		packed_refs->buf = packed_refs->eof = NULL;
+		packed_refs->header_len = 0;
+	}
+
+	if (packed_refs->fd >= 0)
+		close(packed_refs->fd);
+}
+
+/*
+ * Decrease the reference count of *packed_refs.  If it goes to zero,
+ * free *packed_refs and return true; otherwise return false.
+ */
+static int release_packed_ref_cache(struct packed_ref_cache *packed_refs)
+{
+	if (!--packed_refs->referrers) {
+		free_ref_cache(packed_refs->cache);
+		stat_validity_clear(&packed_refs->validity);
+		release_packed_ref_buffer(packed_refs);
+		free(packed_refs);
+		return 1;
+	} else {
+		return 0;
+	}
+}
 
 struct ref_store *packed_ref_store_create(const char *path,
 					  unsigned int store_flags)
@@ -284,12 +320,14 @@ static struct ref_iterator_vtable mmapped_ref_iterator_vtable = {
 };
 
 struct ref_iterator *mmapped_ref_iterator_begin(
-		const char *packed_refs_file,
 		struct packed_ref_cache *packed_refs,
 		const char *pos, const char *eof)
 {
 	struct mmapped_ref_iterator *iter = xcalloc(1, sizeof(*iter));
 	struct ref_iterator *ref_iterator = &iter->base;
+
+	if (!packed_refs->buf)
+		return empty_ref_iterator_begin();
 
 	base_ref_iterator_init(ref_iterator, &mmapped_ref_iterator_vtable, 0);
 
@@ -336,11 +374,8 @@ struct ref_iterator *mmapped_ref_iterator_begin(
 static struct packed_ref_cache *read_packed_refs(struct packed_ref_store *refs)
 {
 	struct packed_ref_cache *packed_refs = xcalloc(1, sizeof(*packed_refs));
-	int fd;
 	struct stat st;
 	size_t size;
-	char *buf;
-	const char *pos, *eof;
 	struct ref_dir *dir;
 	struct ref_iterator *iter;
 	int ok;
@@ -351,13 +386,15 @@ static struct packed_ref_cache *read_packed_refs(struct packed_ref_store *refs)
 	packed_refs->cache->root->flag &= ~REF_INCOMPLETE;
 	packed_refs->peeled = PEELED_NONE;
 
-	fd = open(refs->path, O_RDONLY);
-	if (fd < 0) {
+	packed_refs->fd = open(refs->path, O_RDONLY);
+	if (packed_refs->fd < 0) {
 		if (errno == ENOENT) {
 			/*
 			 * This is OK; it just means that no
 			 * "packed-refs" file has been written yet,
-			 * which is equivalent to it being empty.
+			 * which is equivalent to it being empty,
+			 * which is its state when initialized with
+			 * zeros.
 			 */
 			return packed_refs;
 		} else {
@@ -365,31 +402,37 @@ static struct packed_ref_cache *read_packed_refs(struct packed_ref_store *refs)
 		}
 	}
 
-	stat_validity_update(&packed_refs->validity, fd);
+	stat_validity_update(&packed_refs->validity, packed_refs->fd);
 
-	if (fstat(fd, &st) < 0)
+	if (fstat(packed_refs->fd, &st) < 0)
 		die_errno("couldn't stat %s", refs->path);
 
 	size = xsize_t(st.st_size);
-	buf = xmmap(NULL, size, PROT_READ, MAP_PRIVATE, fd, 0);
-	pos = buf;
-	eof = buf + size;
+	packed_refs->buf = xmmap(NULL, size,
+				 PROT_READ, MAP_PRIVATE,
+				 packed_refs->fd, 0);
+	packed_refs->eof = packed_refs->buf + size;
 
 	/* If the file has a header line, process it: */
-	if (pos < eof && *pos == '#') {
+	if (packed_refs->buf < packed_refs->eof && *packed_refs->buf == '#') {
 		struct strbuf tmp = STRBUF_INIT;
 		char *p;
 		const char *eol;
 		struct string_list traits = STRING_LIST_INIT_NODUP;
 
-		eol = memchr(pos, '\n', eof - pos);
+		eol = memchr(packed_refs->buf, '\n',
+			     packed_refs->eof - packed_refs->buf);
 		if (!eol)
-			die_unterminated_line(refs->path, pos, eof - pos);
+			die_unterminated_line(refs->path,
+					      packed_refs->buf,
+					      packed_refs->eof - packed_refs->buf);
 
-		strbuf_add(&tmp, pos, eol - pos);
+		strbuf_add(&tmp, packed_refs->buf, eol - packed_refs->buf);
 
 		if (!skip_prefix(tmp.buf, "# pack-refs with:", (const char **)&p))
-			die_invalid_line(refs->path, pos, eof - pos);
+			die_invalid_line(refs->path,
+					 packed_refs->buf,
+					 packed_refs->eof - packed_refs->buf);
 
 		string_list_split_in_place(&traits, p, ' ', -1);
 
@@ -400,14 +443,17 @@ static struct packed_ref_cache *read_packed_refs(struct packed_ref_store *refs)
 		/* perhaps other traits later as well */
 
 		/* The "+ 1" is for the LF character. */
-		pos = eol + 1;
+		packed_refs->header_len = eol + 1 - packed_refs->buf;
 
 		string_list_clear(&traits, 0);
 		strbuf_release(&tmp);
 	}
 
 	dir = get_ref_dir(packed_refs->cache->root);
-	iter = mmapped_ref_iterator_begin(refs->path, packed_refs, pos, eof);
+	iter = mmapped_ref_iterator_begin(
+			packed_refs,
+			packed_refs->buf + packed_refs->header_len,
+			packed_refs->eof);
 	while ((ok = ref_iterator_advance(iter)) == ITER_OK) {
 		struct ref_entry *entry =
 			create_ref_entry(iter->refname, iter->oid, iter->flags);
@@ -419,11 +465,6 @@ static struct packed_ref_cache *read_packed_refs(struct packed_ref_store *refs)
 
 	if (ok != ITER_DONE)
 		die("error reading packed-refs file %s", refs->path);
-
-	if (munmap(buf, size))
-		die_errno("error ummapping packed-refs file %s", refs->path);
-
-	close(fd);
 
 	return packed_refs;
 }
