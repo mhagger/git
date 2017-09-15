@@ -1,6 +1,8 @@
 #include "cache.h"
 #include "string-list.h"
 
+struct string_list_item dummy_string_list_item;
+
 void string_list_init(struct string_list *list, int strdup_strings)
 {
 	memset(list, 0, sizeof(*list));
