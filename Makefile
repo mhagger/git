@@ -200,6 +200,9 @@ all::
 #
 # Define NO_MMAP if you want to avoid mmap.
 #
+# Define MMAP_PREVENTS_DELETE if a file that is currently mmapped cannot be
+# deleted or cannot be replaced using rename().
+#
 # Define NO_SYS_POLL_H if you don't have sys/poll.h.
 #
 # Define NO_POLL if you do not have or don't want to use poll().
@@ -1381,6 +1384,13 @@ else
 	ifdef USE_WIN32_MMAP
 		COMPAT_CFLAGS += -DUSE_WIN32_MMAP
 		COMPAT_OBJS += compat/win32mmap.o
+	endif
+endif
+ifdef MMAP_PREVENTS_DELETE
+	BASIC_CFLAGS += -DMMAP_PREVENTS_DELETE
+else
+	ifdef USE_WIN32_MMAP
+		BASIC_CFLAGS += -DMMAP_PREVENTS_DELETE
 	endif
 endif
 ifdef OBJECT_CREATION_USES_RENAMES
