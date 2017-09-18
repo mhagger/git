@@ -359,7 +359,7 @@ static const char *parse_alt_odb_entry(const char *string,
 	return end;
 }
 
-static void link_alt_odb_entries(const char *alt, int len, int sep,
+static void link_alt_odb_entries(const char *alt, int sep,
 				 const char *relative_base, int depth)
 {
 	struct strbuf objdirbuf = STRBUF_INIT;
@@ -407,7 +407,7 @@ void read_info_alternates(const char * relative_base, int depth)
 	map = xmmap(NULL, mapsz, PROT_READ, MAP_PRIVATE, fd, 0);
 	close(fd);
 
-	link_alt_odb_entries(map, mapsz, '\n', relative_base, depth);
+	link_alt_odb_entries(map, '\n', relative_base, depth);
 
 	munmap(map, mapsz);
 }
@@ -464,7 +464,7 @@ void add_to_alternates_file(const char *reference)
 		if (commit_lock_file(lock))
 			die_errno("unable to move new alternates file into place");
 		if (alt_odb_tail)
-			link_alt_odb_entries(reference, strlen(reference), '\n', NULL, 0);
+			link_alt_odb_entries(reference, '\n', NULL, 0);
 	}
 	free(alts);
 }
@@ -477,7 +477,7 @@ void add_to_alternates_memory(const char *reference)
 	 */
 	prepare_alt_odb();
 
-	link_alt_odb_entries(reference, strlen(reference), '\n', NULL, 0);
+	link_alt_odb_entries(reference, '\n', NULL, 0);
 }
 
 /*
@@ -581,7 +581,7 @@ void prepare_alt_odb(void)
 	if (!alt) alt = "";
 
 	alt_odb_tail = &alt_odb_list;
-	link_alt_odb_entries(alt, strlen(alt), PATH_SEP, NULL, 0);
+	link_alt_odb_entries(alt, PATH_SEP, NULL, 0);
 
 	read_info_alternates(get_object_directory(), 0);
 }
