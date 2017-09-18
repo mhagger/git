@@ -388,9 +388,7 @@ static void link_alt_odb_entries(const char *alt, int sep,
 
 void read_info_alternates(const char * relative_base, int depth)
 {
-	char *map;
-	size_t mapsz;
-	struct stat st;
+	struct strbuf contents = STRBUF_INIT;
 	char *path;
 	int fd;
 
@@ -399,17 +397,17 @@ void read_info_alternates(const char * relative_base, int depth)
 	free(path);
 	if (fd < 0)
 		return;
-	if (fstat(fd, &st) || (st.st_size == 0)) {
+
+	if (strbuf_read(&contents, fd, 200) < 0) {
 		close(fd);
 		return;
 	}
-	mapsz = xsize_t(st.st_size);
-	map = xmmap(NULL, mapsz, PROT_READ, MAP_PRIVATE, fd, 0);
+
 	close(fd);
 
-	link_alt_odb_entries(map, '\n', relative_base, depth);
+	link_alt_odb_entries(contents.buf, '\n', relative_base, depth);
 
-	munmap(map, mapsz);
+	strbuf_release(&contents);
 }
 
 struct alternate_object_database *alloc_alt_odb(const char *dir)
