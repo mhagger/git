@@ -62,10 +62,10 @@ struct worktree;
 const char *refs_resolve_ref_unsafe(struct ref_store *refs,
 				    const char *refname,
 				    int resolve_flags,
-				    unsigned char *sha1,
+				    struct object_id *oid,
 				    int *flags);
 const char *resolve_ref_unsafe(const char *refname, int resolve_flags,
-			       unsigned char *sha1, int *flags);
+			       struct object_id *oid, int *flags);
 
 char *refs_resolve_refdup(struct ref_store *refs,
 			  const char *refname, int resolve_flags,
