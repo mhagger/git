@@ -120,8 +120,8 @@ extern int refs_init_db(struct strbuf *err);
  * ultimately resolve to a peelable tag.
  */
 int refs_peel_ref(struct ref_store *refs, const char *refname,
-		  unsigned char *sha1);
-int peel_ref(const char *refname, unsigned char *sha1);
+		  struct object_id *oid);
+int peel_ref(const char *refname, struct object_id *oid);
 
 /**
  * Resolve refname in the nested "gitlink" repository in the specified
