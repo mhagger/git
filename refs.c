@@ -1480,7 +1480,7 @@ const char *resolve_ref_unsafe(const char *refname, int resolve_flags,
 }
 
 int resolve_gitlink_ref(const char *submodule, const char *refname,
-			unsigned char *sha1)
+			struct object_id *oid)
 {
 	struct ref_store *refs;
 	int flags;
@@ -1490,8 +1490,8 @@ int resolve_gitlink_ref(const char *submodule, const char *refname,
 	if (!refs)
 		return -1;
 
-	if (!refs_resolve_ref_unsafe(refs, refname, 0, sha1, &flags) ||
-	    is_null_sha1(sha1))
+	if (!refs_resolve_ref_unsafe(refs, refname, 0, oid->hash, &flags) ||
+	    is_null_oid(oid))
 		return -1;
 	return 0;
 }
