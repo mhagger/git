@@ -1261,6 +1261,74 @@ error:
 	return -1;
 }
 
+int is_packed_transaction_noop(struct ref_store *ref_store,
+			       struct ref_transaction *transaction)
+{
+	struct packed_ref_store *refs = packed_downcast(
+			ref_store,
+			REF_STORE_READ,
+			"is_packed_transaction_noop");
+	struct strbuf referent = STRBUF_INIT;
+	size_t i;
+	int ret;
+
+	if (!is_lock_file_locked(&refs->lock))
+		BUG("is_packed_transaction_noop() called while unlocked");
+
+	/*
+	 * We're only going to bother returning true for the common,
+	 * trivial case that references are only being deleted, their
+	 * old values are not being checked, and the old `packed-refs`
+	 * file doesn't contain any of those reference(s). More
+	 * complicated cases (1) are unlikely to be able to be
+	 * optimized away anyway, and (2) are more expensive to check.
+	 * Start with cheap checks:
+	 */
+	for (i = 0; i < transaction->nr; i++) {
+		struct ref_update *update = transaction->updates[i];
+
+		if (update->flags & REF_HAVE_OLD)
+			/* Have to check the old value -> not a NOOP. */
+			return 0;
+
+		if ((update->flags & REF_HAVE_NEW) && !is_null_oid(&update->new_oid))
+			/* Have to set a new value -> not a NOOP. */
+			return 0;
+	}
+
+	/*
+	 * The transaction isn't checking any old values nor is it
+	 * setting any nonzero new values, so it still might be a
+	 * NOOP. Now do the more expensive check: the update is not a
+	 * NOOP if one of the updates is a delete, and the old
+	 * `packed-refs` file contains a value for that reference.
+	 */
+	ret = 1;
+	for (i = 0; i < transaction->nr; i++) {
+		struct ref_update *update = transaction->updates[i];
+		unsigned int type;
+		struct object_id oid;
+
+		if (!(update->flags & REF_HAVE_NEW))
+			/* This reference isn't being deleted -> NOOP. */
+			continue;
+
+		if (!refs_read_raw_ref(ref_store, update->refname,
+				       oid.hash, &referent, &type) ||
+		    errno != ENOENT) {
+			/*
+			 * We might have to actually delete that
+			 * reference -> not a NOOP.
+			 */
+			ret = 0;
+			break;
+		}
+	}
+
+	strbuf_release(&referent);
+	return ret;
+}
+
 struct packed_transaction_backend_data {
 	/* True iff the transaction owns the packed-refs lock. */
 	int own_lock;
