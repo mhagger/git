@@ -521,8 +521,9 @@ static int load_contents(struct snapshot *snapshot)
  * reference name; for example, one could search for "refs/replace/"
  * to find the start of any replace references.
  *
+ * This function must only be called if `snapshot->buf` is non-NULL.
  * The record is sought using a binary search, so `snapshot->buf` must
- * be sorted.
+ * also be sorted.
  */
 static const char *find_reference_location(struct snapshot *snapshot,
 					   const char *refname, int mustexist)
@@ -727,6 +728,12 @@ static int packed_read_raw_ref(struct ref_store *ref_store,
 	const char *rec;
 
 	*type = 0;
+
+	if (!snapshot->buf) {
+		/* There are no packed references */
+		errno = ENOENT;
+		return -1;
+	}
 
 	rec = find_reference_location(snapshot, refname, 1);
 
