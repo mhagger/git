@@ -613,7 +613,7 @@ static struct snapshot *create_snapshot(struct packed_ref_store *refs)
 	acquire_snapshot(snapshot);
 	snapshot->peeled = PEELED_NONE;
 
-	if (!load_contents(snapshot))
+	if (!load_contents(snapshot) || !snapshot->buf)
 		return snapshot;
 
 	/* If the file has a header line, process it: */
