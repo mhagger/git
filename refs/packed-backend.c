@@ -69,11 +69,11 @@ struct snapshot {
 
 	/*
 	 * The contents of the `packed-refs` file. If the file was
-	 * already sorted, this points at the mmapped contents of the
-	 * file. If not, this points at heap-allocated memory
-	 * containing the contents, sorted. If there were no contents
-	 * (e.g., because the file didn't exist), `buf` and `eof` are
-	 * both NULL.
+	 * already sorted and if mmapping is allowed, this points at
+	 * the mmapped contents of the file. If not, this points at
+	 * heap-allocated memory containing the contents, sorted. If
+	 * there were no contents (e.g., because the file didn't exist
+	 * or was empty), `buf` and `eof` are both NULL.
 	 */
 	char *buf, *eof;
 
