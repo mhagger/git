@@ -20,7 +20,8 @@ test_expect_success \
     'echo Hello > A &&
      git update-index --add A &&
      git commit -m "Initial commit." &&
-     HEAD=$(git rev-parse --verify HEAD)'
+     HEAD=$(git rev-parse --verify HEAD) &&
+     git tag -m "A tag" annotated-tag'
 
 SHA1=
 
@@ -219,6 +220,36 @@ test_expect_success 'reject packed-refs with a short SHA-1' '
 	printf "fatal: unexpected line in .git/packed-refs: %.7s %s\n" $HEAD refs/zzzzz >expected_err &&
 	test_must_fail git for-each-ref >out 2>err &&
 	test_cmp expected_err err
+'
+
+test_expect_success 'handle packed-refs with a bogus header' '
+	git show-ref -d >expected &&
+	mv .git/packed-refs .git/packed-refs.bak &&
+	test_when_finished "mv .git/packed-refs.bak .git/packed-refs" &&
+	sed -e "s/^#.*/# whacked-refs/" <.git/packed-refs.bak >.git/packed-refs &&
+	git show-ref -d >actual 2>err &&
+	test_cmp expected actual &&
+	test_must_be_empty err
+'
+
+test_expect_success 'handle packed-refs with a truncated header' '
+	git show-ref -d >expected &&
+	mv .git/packed-refs .git/packed-refs.bak &&
+	test_when_finished "mv .git/packed-refs.bak .git/packed-refs" &&
+	sed -e "s/^#.*/# pack-refs/" <.git/packed-refs.bak >.git/packed-refs &&
+	git show-ref -d >actual 2>err &&
+	test_cmp expected actual &&
+	test_must_be_empty err
+'
+
+test_expect_success 'handle packed-refs with no traits in header' '
+	git show-ref -d >expected &&
+	mv .git/packed-refs .git/packed-refs.bak &&
+	test_when_finished "mv .git/packed-refs.bak .git/packed-refs" &&
+	sed -e "s/^#.*/# pack-refs with:/" <.git/packed-refs.bak >.git/packed-refs &&
+	git show-ref -d >actual 2>err &&
+	test_cmp expected actual &&
+	test_must_be_empty err
 '
 
 test_expect_success 'timeout if packed-refs.lock exists' '

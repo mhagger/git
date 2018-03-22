@@ -635,21 +635,18 @@ static struct snapshot *create_snapshot(struct packed_ref_store *refs)
 
 		tmp = xmemdupz(snapshot->buf, eol - snapshot->buf);
 
-		if (!skip_prefix(tmp, "# pack-refs with:", (const char **)&p))
-			die_invalid_line(refs->path,
-					 snapshot->buf,
-					 snapshot->eof - snapshot->buf);
+		if (skip_prefix(tmp, "# pack-refs with:", (const char **)&p)) {
+			string_list_split_in_place(&traits, p, ' ', -1);
 
-		string_list_split_in_place(&traits, p, ' ', -1);
+			if (unsorted_string_list_has_string(&traits, "fully-peeled"))
+				snapshot->peeled = PEELED_FULLY;
+			else if (unsorted_string_list_has_string(&traits, "peeled"))
+				snapshot->peeled = PEELED_TAGS;
 
-		if (unsorted_string_list_has_string(&traits, "fully-peeled"))
-			snapshot->peeled = PEELED_FULLY;
-		else if (unsorted_string_list_has_string(&traits, "peeled"))
-			snapshot->peeled = PEELED_TAGS;
+			sorted = unsorted_string_list_has_string(&traits, "sorted");
 
-		sorted = unsorted_string_list_has_string(&traits, "sorted");
-
-		/* perhaps other traits later as well */
+			/* perhaps other traits later as well */
+		}
 
 		/* The "+ 1" is for the LF character. */
 		snapshot->start = eol + 1;
